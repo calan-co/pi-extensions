@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -77,6 +77,28 @@ test("intake separates source from owner domain and fail-closes a target-POC mis
     () => plane.assignWorkItem(mismatched.defect.id, { id: "BUG-2", path: "backlog/BUG-2.md", status: "proposed", lifecycleStates: ["proposed"] }, poc.sessionId),
     /not authorized to assign a work item/i,
   );
+});
+
+test("a registered owner POC can explicitly re-attest a legacy defect", async () => {
+  const { statePath } = await setup();
+  const plane = new TriageControlPlane({ statePath });
+  await plane.registerPoc("ttr", poc, false);
+  const { defect } = await plane.intake({
+    reporter: "validator", source: "intercom", sourceDomain: "babysitter-dv", ownerDomain: "ttr", targetPocSessionId: poc.sessionId,
+    symptom: "legacy authority missing", impact: "lane blocked", environment: "test", reproduction: "load legacy state", evidenceReferences: [], currentSessionId: poc.sessionId,
+  });
+  const state = JSON.parse(await readFile(statePath, "utf8"));
+  delete state.defects[defect.id].intake.sourceDomain;
+  delete state.defects[defect.id].intake.targetPocSessionId;
+  delete state.defects[defect.id].intake.authorityConfirmed;
+  await writeFile(statePath, `${JSON.stringify(state)}\n`);
+
+  const reattested = await plane.reattestDefectAuthority(defect.id, {
+    sourceDomain: "babysitter-dv", ownerDomain: "ttr", targetPocSessionId: poc.sessionId, actorSessionId: poc.sessionId,
+  });
+  assert.equal(reattested.intake.authorityConfirmed, true);
+  assert.equal(reattested.intake.sourceDomain, "babysitter-dv");
+  assert.equal(await plane.ensurePocAuthority(defect.id, poc.sessionId).then(item => item.id), defect.id);
 });
 
 test("a defect has one authoritative work item and only configured lifecycle transitions", async () => {

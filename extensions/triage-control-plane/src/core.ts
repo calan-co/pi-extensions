@@ -257,6 +257,27 @@ export class TriageControlPlane {
     return clone(this.requirePocAuthority(state, defectId, actorSessionId));
   }
 
+  async reattestDefectAuthority(defectId: string, input: { sourceDomain: string; ownerDomain: string; targetPocSessionId: string; actorSessionId: string }): Promise<Defect> {
+    const domain = normalizedDomain(input.ownerDomain);
+    const sourceDomain = normalizedDomain(input.sourceDomain);
+    const targetPocSessionId = input.targetPocSessionId?.trim();
+    if (!targetPocSessionId) throw new Error("target POC sessionId is required for re-attestation");
+    return this.transaction((state) => {
+      const defect = this.requireDefect(state, defectId);
+      if (defect.intake.authorityConfirmed === true) throw new Error(`Defect ${defectId} already has confirmed intake authority`);
+      const poc = state.registrations[domain];
+      if (!poc?.active || poc.sessionId !== input.actorSessionId || targetPocSessionId !== input.actorSessionId) {
+        throw new Error(`Session is not authorized to re-attest defect ${defectId} for ${domain}`);
+      }
+      defect.domain = domain;
+      defect.ownerPocSessionId = poc.sessionId;
+      defect.intake.sourceDomain = sourceDomain;
+      defect.intake.targetPocSessionId = targetPocSessionId;
+      defect.intake.authorityConfirmed = true;
+      return defect;
+    });
+  }
+
   async assignWorkItem(defectId: string, workItem: Omit<WorkItem, "adapter"> & { adapter?: string }, actorSessionId: string): Promise<Defect> {
     return this.transaction((state) => {
       const defect = this.requirePocAuthority(state, defectId, actorSessionId);

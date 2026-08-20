@@ -102,6 +102,13 @@ ttr_intake({
   reproduction: "submit Visa test card", evidenceReferences: ["ticket:123", "request:req-7"]
 })
 
+// One-time explicit migration for a legacy record created before the routing contract.
+// Only the active owner POC named by targetPocSessionId can re-attest it.
+ttr_reattest_defect_authority({
+  defectId: "ttr-…", sourceDomain: "babysitter-dv", ownerDomain: "ttr",
+  targetPocSessionId: "<active-ttr-poc-session-id>"
+})
+
 // Before any diagnosis/design/implementation/review/validation/deployment lane:
 ttr_assign_work_item({
   defectId: "ttr-…", workItemId: "BUG-123", workItemPath: "backlog/BUG-123.md",

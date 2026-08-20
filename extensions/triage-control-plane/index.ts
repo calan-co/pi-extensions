@@ -103,6 +103,7 @@ export default function triageControlPlane(pi: ExtensionAPI) {
       if (subcommand === "register") {
         const input = parseRegisterArgs(subcommandArgs, await domainFromContext(pi, ctx.cwd));
         const records = await plane.registerPocs(input.domains, { sessionId: input.sessionId ?? currentSessionId(ctx), projectBoundary: ctx.cwd }, input.replace);
+        pi.setSessionName(`ttr: ${records[0]!.domain}`);
         ctx.ui.notify(`TTR POC registered: ${records.map(record => record.domain).join(", ")} → ${records[0]!.sessionId}`, "info");
         return;
       }
@@ -134,6 +135,14 @@ export default function triageControlPlane(pi: ExtensionAPI) {
     async execute(_id, params, _signal, _update, ctx) {
       const result = await plane.intake({ ...params, currentSessionId: currentSessionId(ctx) });
       return json({ ...result, handoff: result.handoff ? { ...result.handoff, senderContract: `Use only an established channel after confirming the POC is reachable: intercom({ action: \"send\", to: ${JSON.stringify(result.handoff.targetSessionId)}, message: ${JSON.stringify(JSON.stringify(result.handoff.payload))} })` } : undefined });
+    },
+  });
+
+  pi.registerTool({
+    name: "ttr_reattest_defect_authority", label: "Re-attest Defect Authority", description: "Explicitly re-attest a legacy defect's source, owner, and target POC routing. Only the active owner POC addressed by targetPocSessionId may perform this one-time migration.",
+    parameters: Type.Object({ defectId: Type.String(), sourceDomain: Type.String(), ownerDomain: Type.String(), targetPocSessionId: Type.String() }),
+    async execute(_id, params, _signal, _update, ctx) {
+      return json(await plane.reattestDefectAuthority(params.defectId, { ...params, actorSessionId: currentSessionId(ctx) }));
     },
   });
 
