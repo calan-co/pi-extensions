@@ -53,6 +53,7 @@ Enforced by supported TTR tools:
 - evidence-only handoff generation when the resolved owner POC, declared target POC, and receiving session do not all match;
 - `ttr_prepare_work_lane` refuses to produce a supported diagnosis/review/validation/implementation lane contract until the authoritative work item exists, and its emitted preamble must be passed to the lane;
 - exactly one authoritative work-item reference per TTR defect, and only its configured lifecycle states;
+- reassignment only by the active, addressed owner POC, with a nonempty replacement ID/path/status/lifecycle, no same or colliding assignment, and append-only prior-item audit history containing a reason and evidence references;
 - requester-message category validation and evidence recording;
 - release-gate checks for authoritative item, clean Git tree, commit/validation/review evidence, deployment artifact/receipt/verification, final post-deployment item update, and linked **distinct** second commit evidence;
 - `safe-to-proceed` only after the supported gate passes.
@@ -113,6 +114,13 @@ ttr_reattest_defect_authority({
 ttr_assign_work_item({
   defectId: "ttr-…", workItemId: "BUG-123", workItemPath: "backlog/BUG-123.md",
   status: "in-progress", lifecycleStates: ["proposed", "in-progress", "ready-for-review", "closed"]
+})
+
+// Only the active, addressed owner POC may replace an authoritative item. TTR preserves BUG-123 in immutable audit history.
+ttr_reassign_work_item({
+  defectId: "ttr-…", workItemId: "BUG-456", workItemPath: "backlog/BUG-456.md",
+  status: "proposed", lifecycleStates: ["proposed", "in-progress", "closed"],
+  reason: "duplicate tracker item", evidenceReferences: ["ticket:123"]
 })
 
 // Required supported-lane preamble to pass into any diagnosis/review/validation/implementation lane:

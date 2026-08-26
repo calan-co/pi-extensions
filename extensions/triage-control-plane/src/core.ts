@@ -47,6 +47,14 @@ export interface WorkItem {
   lifecycleStates: string[];
 }
 
+/** Append-only snapshot of an authoritative work item replaced by its owner POC. */
+export interface WorkItemReassignmentAudit {
+  previousWorkItem: WorkItem;
+  reason: string;
+  evidenceReferences: string[];
+  reassignedAt: string;
+}
+
 export interface Defect {
   id: string;
   domain: string;
@@ -65,6 +73,8 @@ export interface Defect {
     recordedAt: string;
   };
   workItem?: WorkItem;
+  /** Prior authoritative work items retained as immutable reassignment audit snapshots. */
+  workItemHistory: WorkItemReassignmentAudit[];
   evidence: Evidence[];
   blocker?: string;
   nextAction?: string;
@@ -232,6 +242,7 @@ export class TriageControlPlane {
         id, domain, ownerPocSessionId: poc?.sessionId ?? "unassigned",
         intake: { reporter: input.reporter, source: input.source, sourceDomain, targetPocSessionId, authorityConfirmed, symptom: input.symptom, impact: input.impact, environment: input.environment, reproduction: input.reproduction, evidenceReferences: [...input.evidenceReferences], recordedAt },
         evidence: input.evidenceReferences.map(path => ({ id: randomUUID(), type: "intake", path, createdAt: recordedAt, status: "recorded" })),
+        workItemHistory: [],
         statusHistory: [],
       };
       state.defects[id] = defect;
@@ -282,12 +293,34 @@ export class TriageControlPlane {
     return this.transaction((state) => {
       const defect = this.requirePocAuthority(state, defectId, actorSessionId);
       if (defect.workItem) throw new Error(`Defect ${defectId} already has an authoritative work item: ${defect.workItem.id}`);
-      if (!workItem.id || !workItem.path || !workItem.status || workItem.lifecycleStates.length === 0) throw new Error("work-item id, path, status, and configured lifecycleStates are required");
-      if (!workItem.lifecycleStates.includes(workItem.status)) throw new Error("initial work-item status must be in configured lifecycleStates");
-      const duplicate = Object.values(state.defects).find(other => other.id !== defectId && other.workItem?.id === workItem.id);
-      if (duplicate) throw new Error(`Work item ${workItem.id} is already authoritative for defect ${duplicate.id}`);
-      defect.workItem = { ...workItem, lifecycleStates: [...workItem.lifecycleStates], adapter: workItem.adapter ?? "explicit-lifecycle" };
-      defect.statusHistory.push({ at: this.now(), status: workItem.status, note: "authoritative work item assigned" });
+      const assignedWorkItem = this.validateWorkItem(workItem);
+      this.requireNoWorkItemCollision(state, defectId, assignedWorkItem);
+      defect.workItem = assignedWorkItem;
+      defect.statusHistory.push({ at: this.now(), status: assignedWorkItem.status, note: "authoritative work item assigned" });
+      return defect;
+    });
+  }
+
+  async reassignWorkItem(defectId: string, workItem: Omit<WorkItem, "adapter"> & { adapter?: string }, audit: { reason: string; evidenceReferences: string[] }, actorSessionId: string): Promise<Defect> {
+    return this.transaction((state) => {
+      const defect = this.requirePocAuthority(state, defectId, actorSessionId, "reassign");
+      const previousWorkItem = this.requireWorkItem(defect);
+      const replacement = this.validateWorkItem(workItem);
+      if (!audit.reason?.trim() || !Array.isArray(audit.evidenceReferences) || audit.evidenceReferences.length === 0 || audit.evidenceReferences.some(reference => !reference.trim())) {
+        throw new Error("reassignment reason and evidence references are required");
+      }
+      if (previousWorkItem.id === replacement.id || previousWorkItem.path === replacement.path) {
+        throw new Error("replacement work item is the same as the authoritative work item");
+      }
+      this.requireNoWorkItemCollision(state, defectId, replacement);
+      (defect.workItemHistory ??= []).push({
+        previousWorkItem: clone(previousWorkItem),
+        reason: audit.reason.trim(),
+        evidenceReferences: [...audit.evidenceReferences],
+        reassignedAt: this.now(),
+      });
+      defect.workItem = replacement;
+      defect.statusHistory.push({ at: this.now(), status: replacement.status, note: "authoritative work item reassigned" });
       return defect;
     });
   }
@@ -380,12 +413,23 @@ export class TriageControlPlane {
     return this.recordEvidence(defectId, { type: "requester-message", status: "recorded", category: category as RequesterMessageCategory, message: message.trim(), delivery: "not-delivered" });
   }
 
+  private validateWorkItem(workItem: Omit<WorkItem, "adapter"> & { adapter?: string }): WorkItem {
+    if (!workItem.id?.trim() || !workItem.path?.trim() || !workItem.status?.trim() || !Array.isArray(workItem.lifecycleStates) || workItem.lifecycleStates.length === 0 || workItem.lifecycleStates.some(status => !status.trim())) {
+      throw new Error("work-item id, path, status, and configured lifecycleStates are required");
+    }
+    if (!workItem.lifecycleStates.includes(workItem.status)) throw new Error("initial work-item status must be in configured lifecycleStates");
+    return { ...workItem, lifecycleStates: [...workItem.lifecycleStates], adapter: workItem.adapter ?? "explicit-lifecycle" };
+  }
+  private requireNoWorkItemCollision(state: State, defectId: string, workItem: WorkItem): void {
+    const duplicate = Object.values(state.defects).find(other => other.id !== defectId && (other.workItem?.id === workItem.id || other.workItem?.path === workItem.path));
+    if (duplicate) throw new Error(`Work item ${workItem.id} is already authoritative for defect ${duplicate.id}`);
+  }
   private requireDefect(state: State, defectId: string): Defect { const defect = state.defects[defectId]; if (!defect) throw new Error(`Unknown defect: ${defectId}`); return defect; }
-  private requirePocAuthority(state: State, defectId: string, actorSessionId: string): Defect {
+  private requirePocAuthority(state: State, defectId: string, actorSessionId: string, action = "assign"): Defect {
     const defect = this.requireDefect(state, defectId);
     const activePoc = state.registrations[defect.domain];
     if (!defect.intake.authorityConfirmed || defect.ownerPocSessionId !== actorSessionId || defect.intake.targetPocSessionId !== actorSessionId || !activePoc?.active || activePoc.sessionId !== actorSessionId) {
-      throw new Error(`Session is not authorized to assign a work item for defect ${defectId}`);
+      throw new Error(`Session is not authorized to ${action} a work item for defect ${defectId}`);
     }
     return defect;
   }

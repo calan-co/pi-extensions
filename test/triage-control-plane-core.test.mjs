@@ -114,6 +114,28 @@ test("a defect has one authoritative work item and only configured lifecycle tra
   assert.equal(updated.blocker, "awaiting logs");
 });
 
+test("an active authorized defect owner can reassign a work item with immutable audit history", async () => {
+  const { statePath } = await setup();
+  const plane = new TriageControlPlane({ statePath, now: () => "2026-01-02T00:00:00.000Z" });
+  await plane.registerPoc("payments", poc, false);
+  const { defect } = await plane.intake({ reporter: "r", source: "s", sourceDomain: "s", ownerDomain: "payments", targetPocSessionId: poc.sessionId, symptom: "x", impact: "high", environment: "prod", reproduction: "r", evidenceReferences: [], currentSessionId: poc.sessionId });
+  await plane.assignWorkItem(defect.id, { id: "BUG-1", path: "backlog/BUG-1.md", status: "proposed", lifecycleStates: ["proposed", "in-progress"] }, poc.sessionId);
+
+  await assert.rejects(() => plane.reassignWorkItem(defect.id, { id: "BUG-2", path: "backlog/BUG-2.md", status: "proposed", lifecycleStates: ["proposed"] }, { reason: "duplicate issue", evidenceReferences: ["ticket:123"] }, "other-session"), /not authorized to reassign a work item/i);
+  await assert.rejects(() => plane.reassignWorkItem(defect.id, { id: "BUG-2", path: "backlog/BUG-2.md", status: "proposed", lifecycleStates: ["proposed"] }, { reason: "", evidenceReferences: [] }, poc.sessionId), /reason and evidence references are required/i);
+  await assert.rejects(() => plane.reassignWorkItem(defect.id, { id: "", path: "", status: "", lifecycleStates: [] }, { reason: "duplicate issue", evidenceReferences: ["ticket:123"] }, poc.sessionId), /id, path, status, and configured lifecycleStates are required/i);
+  await assert.rejects(() => plane.reassignWorkItem(defect.id, { id: "BUG-2", path: "backlog/BUG-2.md", status: "closed", lifecycleStates: ["proposed"] }, { reason: "duplicate issue", evidenceReferences: ["ticket:123"] }, poc.sessionId), /status must be in configured lifecycleStates/i);
+  await assert.rejects(() => plane.reassignWorkItem(defect.id, { id: "BUG-1", path: "backlog/BUG-1.md", status: "proposed", lifecycleStates: ["proposed"] }, { reason: "duplicate issue", evidenceReferences: ["ticket:123"] }, poc.sessionId), /same as the authoritative work item/i);
+
+  const reassigned = await plane.reassignWorkItem(defect.id, { id: "BUG-2", path: "backlog/BUG-2.md", status: "in-progress", lifecycleStates: ["proposed", "in-progress"] }, { reason: "duplicate issue", evidenceReferences: ["ticket:123"] }, poc.sessionId);
+  assert.equal(reassigned.workItem?.id, "BUG-2");
+  assert.deepEqual(reassigned.workItemHistory, [{ previousWorkItem: { id: "BUG-1", path: "backlog/BUG-1.md", adapter: "explicit-lifecycle", status: "proposed", lifecycleStates: ["proposed", "in-progress"] }, reason: "duplicate issue", evidenceReferences: ["ticket:123"], reassignedAt: "2026-01-02T00:00:00.000Z" }]);
+
+  const { defect: otherDefect } = await plane.intake({ reporter: "r", source: "s", sourceDomain: "s", ownerDomain: "payments", targetPocSessionId: poc.sessionId, symptom: "y", impact: "high", environment: "prod", reproduction: "r", evidenceReferences: [], currentSessionId: poc.sessionId });
+  await plane.assignWorkItem(otherDefect.id, { id: "BUG-3", path: "backlog/BUG-3.md", status: "proposed", lifecycleStates: ["proposed"] }, poc.sessionId);
+  await assert.rejects(() => plane.reassignWorkItem(defect.id, { id: "BUG-4", path: "backlog/BUG-3.md", status: "proposed", lifecycleStates: ["proposed"] }, { reason: "wrong queue", evidenceReferences: ["ticket:456"] }, poc.sessionId), /already authoritative for defect/i);
+});
+
 test("requester-message categories reject noise and record accepted message evidence", async () => {
   const { statePath } = await setup();
   const plane = new TriageControlPlane({ statePath });

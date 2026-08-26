@@ -11,13 +11,16 @@ async function loadExtension() {
 
 function setupApi() {
   const commands = new Map();
+  const tools = new Map();
   const notifications = [];
   return {
     commands,
+    tools,
     notifications,
     api: {
       registerCommand(name, spec) { commands.set(name, spec); },
-      registerTool() {},
+      registerTool(spec) { tools.set(spec.name, spec); },
+      setSessionName() {},
       async exec(command, args) {
         assert.equal(command, "git");
         assert.deepEqual(args, ["rev-parse", "--show-toplevel"]);
@@ -34,9 +37,10 @@ function setupApi() {
 
 test("/ttr register records a canonical domain and every supplied alias", async () => {
   const triageControlPlane = await loadExtension();
-  const { api, commands, notifications, context } = setupApi();
+  const { api, commands, tools, notifications, context } = setupApi();
   triageControlPlane(api);
 
+  assert.ok(tools.has("ttr_reassign_work_item"));
   await commands.get("ttr").handler("register pi-extensions ttr agent-workflows handoff", context);
   await commands.get("ttr").handler("poc handoff", context);
 

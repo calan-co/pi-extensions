@@ -152,6 +152,13 @@ export default function triageControlPlane(pi: ExtensionAPI) {
     async execute(_id, params, _signal, _update, ctx) { return json(await plane.assignWorkItem(params.defectId, { id: params.workItemId, path: params.workItemPath, status: params.status, lifecycleStates: params.lifecycleStates, adapter: params.adapter }, currentSessionId(ctx))); },
   });
   pi.registerTool({
+    name: "ttr_reassign_work_item", label: "Reassign Authoritative Work Item", description: "Replace an authoritative work item only as the active, addressed owner POC. The prior item is retained in immutable audit history with a required reason and evidence references.",
+    parameters: Type.Object({ defectId: Type.String(), workItemId: Type.String(), workItemPath: Type.String(), status: Type.String(), lifecycleStates: Type.Array(Type.String()), adapter: Type.Optional(Type.String()), reason: Type.String(), evidenceReferences: Type.Array(Type.String(), { minItems: 1 }) }),
+    async execute(_id, params, _signal, _update, ctx) {
+      return json(await plane.reassignWorkItem(params.defectId, { id: params.workItemId, path: params.workItemPath, status: params.status, lifecycleStates: params.lifecycleStates, adapter: params.adapter }, { reason: params.reason, evidenceReferences: params.evidenceReferences }, currentSessionId(ctx)));
+    },
+  });
+  pi.registerTool({
     name: "ttr_transition_work_item", label: "Transition Work Item", description: "Record an authoritative work-item transition using only its configured lifecycle status; blockers and next action remain separate fields.",
     parameters: Type.Object({ defectId: Type.String(), status: Type.String(), blocker: Type.Optional(Type.String()), nextAction: Type.Optional(Type.String()) }),
     async execute(_id, params) { return json(await plane.transitionWorkItem(params.defectId, params.status, { blocker: params.blocker, nextAction: params.nextAction })); },
