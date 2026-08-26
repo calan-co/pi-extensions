@@ -42,7 +42,8 @@
       "extensions/pi-rewind/index.ts",
       "extensions/agent-workflows/index.ts",
       "extensions/session-move/index.ts",
-      "extensions/triage-control-plane/index.ts"
+      "extensions/triage-control-plane/index.ts",
+      "extensions/pi-channel/index.ts"
     ]
   }
 }
