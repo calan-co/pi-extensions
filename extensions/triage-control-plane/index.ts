@@ -15,6 +15,7 @@ const TTR_SUBCOMMANDS = [
   { value: "poc", label: "poc", description: "Inspect a domain's active POC" },
   { value: "pocs", label: "pocs", description: "List active POC registrations" },
   { value: "deactivate", label: "deactivate", description: "Deactivate a domain's POC" },
+  { value: "autoname", label: "autoname", description: "Opt in to guarded TTR session naming" },
 ] as const;
 
 function json(value: unknown): { content: Array<{ type: "text"; text: string }>; details: unknown } {
@@ -57,6 +58,15 @@ async function domainFromContext(pi: ExtensionAPI, cwd: string): Promise<string>
   return domain;
 }
 
+function parseNameArgs(args: string): { action: "on" | "off" | "status" | "refresh"; force: boolean } {
+  const tokens = args.trim().split(/\s+/).filter(Boolean);
+  const force = tokens.includes("--force");
+  const values = tokens.filter(token => token !== "--force");
+  if (values.length !== 1 || !["on", "off", "status", "refresh"].includes(values[0]!)) throw new Error("Usage: /ttr autoname <on|off|status|refresh> [--force]");
+  if (force && values[0] !== "refresh") throw new Error("--force is supported only by /ttr autoname refresh");
+  return { action: values[0] as "on" | "off" | "status" | "refresh", force };
+}
+
 function parseDomain(args: string, defaultDomain: string, usage: string): string {
   const values = args.trim().split(/\s+/).filter(Boolean);
   if (values.length > 1) throw new Error(`Usage: ${usage}`);
@@ -69,6 +79,16 @@ function ttrArgumentCompletions(prefix: string) {
   if (tokens.length === 0) return [...TTR_SUBCOMMANDS];
   if (tokens.length === 1 && !hasTrailingSpace) {
     return TTR_SUBCOMMANDS.filter(item => item.value.startsWith(tokens[0]!));
+  }
+  if (tokens[0] === "autoname") {
+    const current = hasTrailingSpace ? "" : tokens.at(-1)!;
+    return [
+      { value: "on", label: "on", description: "Enable guarded naming for this Pi session" },
+      { value: "off", label: "off", description: "Disable naming for this Pi session" },
+      { value: "status", label: "status", description: "Show naming status" },
+      { value: "refresh", label: "refresh", description: "Refresh the name if TTR owns it" },
+      { value: "--force", label: "--force", description: "Overwrite an explicit name when refreshing" },
+    ].filter(item => item.value.startsWith(current));
   }
   if (tokens[0] !== "register") return null;
   const current = hasTrailingSpace ? "" : tokens.at(-1)!;
@@ -84,6 +104,21 @@ export default function triageControlPlane(pi: ExtensionAPI) {
     statePath: STATE_PATH,
     git: async () => ({ clean: false }), // Tool calls override this with the actual cwd-aware inspector below.
   });
+  const syncSessionName = async (ctx: ExtensionContext, force = false): Promise<boolean> => {
+    const sessionId = currentSessionId(ctx);
+    if (!await plane.isSessionNamingEnabled(sessionId)) return false;
+    const poc = (await plane.listPocs()).find(record => record.active && record.sessionId === sessionId);
+    if (!poc) return false;
+    const desired = `ttr: ${poc.canonicalDomain ?? poc.domain}`;
+    const current = pi.getSessionName?.() ?? ctx.sessionManager.getSessionName?.();
+    if (current && current !== desired && !force) return false;
+    if (current !== desired) pi.setSessionName(desired);
+    return true;
+  };
+  const afterTtrActivity = async <T>(ctx: ExtensionContext, action: () => Promise<T>): Promise<T> => {
+    await syncSessionName(ctx);
+    return action();
+  };
   const withGit = (cwd: string) => new TriageControlPlane({
     statePath: STATE_PATH,
     git: async () => {
@@ -94,7 +129,7 @@ export default function triageControlPlane(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("ttr", {
-    description: "TTR control plane: register, poc, pocs, or deactivate. Domains default to the current repository name.",
+    description: "TTR control plane: register, poc, pocs, deactivate, or autoname. Domains default to the current repository name.",
     getArgumentCompletions: ttrArgumentCompletions,
     handler: async (args, ctx) => {
       const [subcommand = "", ...rest] = (args || "").trim().split(/\s+/).filter(Boolean);
@@ -102,28 +137,45 @@ export default function triageControlPlane(pi: ExtensionAPI) {
 
       if (subcommand === "register") {
         const input = parseRegisterArgs(subcommandArgs, await domainFromContext(pi, ctx.cwd));
-        const records = await plane.registerPocs(input.domains, { sessionId: input.sessionId ?? currentSessionId(ctx), projectBoundary: ctx.cwd }, input.replace);
-        pi.setSessionName(`ttr: ${records[0]!.domain}`);
+        const activeSessionId = currentSessionId(ctx);
+        const records = await plane.registerPocs(input.domains, { sessionId: input.sessionId ?? activeSessionId, projectBoundary: ctx.cwd }, input.replace);
+        // TTR registration is a channel publisher only for the active trace it can append to.
+        if (records.some(record => record.sessionId === activeSessionId)) {
+          pi.appendEntry("pi-channel", { version: 1, op: "join", channel: "ttr", source: "ttr" });
+        }
+        await syncSessionName(ctx);
         ctx.ui.notify(`TTR POC registered: ${records.map(record => record.domain).join(", ")} → ${records[0]!.sessionId}`, "info");
+        return;
+      }
+      if (subcommand === "autoname") {
+        const { action, force } = parseNameArgs(subcommandArgs);
+        const sessionId = currentSessionId(ctx);
+        if (action === "on" || action === "off") await plane.setSessionNaming(sessionId, action === "on");
+        const updated = action === "on" || action === "refresh" ? await syncSessionName(ctx, force) : false;
+        const enabled = await plane.isSessionNamingEnabled(sessionId);
+        ctx.ui.notify(`TTR session naming: ${enabled ? "on" : "off"}${updated ? " (updated)" : ""}`, "info");
         return;
       }
       if (subcommand === "poc") {
         const domain = parseDomain(subcommandArgs, await domainFromContext(pi, ctx.cwd), "/ttr poc [domain]");
         ctx.ui.notify(JSON.stringify(await plane.resolvePoc(domain), null, 2), "info");
+        await syncSessionName(ctx);
         return;
       }
       if (subcommand === "pocs") {
         if (subcommandArgs) throw new Error("Usage: /ttr pocs");
         ctx.ui.notify(JSON.stringify(await plane.listPocs(), null, 2), "info");
+        await syncSessionName(ctx);
         return;
       }
       if (subcommand === "deactivate") {
         const domain = parseDomain(subcommandArgs, await domainFromContext(pi, ctx.cwd), "/ttr deactivate [domain]");
         const record = await plane.deactivatePoc(domain);
         ctx.ui.notify(`TTR POC deactivated: ${record.domain}`, "info");
+        await syncSessionName(ctx);
         return;
       }
-      throw new Error("Usage: /ttr <register|poc|pocs|deactivate> [domain]");
+      throw new Error("Usage: /ttr <register|poc|pocs|deactivate|autoname> [domain]");
     },
   });
 
@@ -133,7 +185,7 @@ export default function triageControlPlane(pi: ExtensionAPI) {
     promptGuidelines: ["Use ttr_intake before diagnosis, subagent lanes, implementation, review, validation, deployment, or requester messaging for a defect.", "Never infer ownerDomain from sourceDomain or a sender workspace; resolve it through the TTR POC registry."],
     parameters: Type.Object({ reporter: Type.String(), source: Type.String(), sourceDomain: Type.String(), ownerDomain: Type.String(), targetPocSessionId: Type.String(), symptom: Type.String(), impact: Type.String(), environment: Type.String(), reproduction: Type.String(), evidenceReferences: Type.Array(Type.String()) }),
     async execute(_id, params, _signal, _update, ctx) {
-      const result = await plane.intake({ ...params, currentSessionId: currentSessionId(ctx) });
+      const result = await afterTtrActivity(ctx, () => plane.intake({ ...params, currentSessionId: currentSessionId(ctx) }));
       return json({ ...result, handoff: result.handoff ? { ...result.handoff, senderContract: `Use only an established channel after confirming the POC is reachable: intercom({ action: \"send\", to: ${JSON.stringify(result.handoff.targetSessionId)}, message: ${JSON.stringify(JSON.stringify(result.handoff.payload))} })` } : undefined });
     },
   });
@@ -149,7 +201,7 @@ export default function triageControlPlane(pi: ExtensionAPI) {
   pi.registerTool({
     name: "ttr_assign_work_item", label: "Assign Authoritative Work Item", description: "Assign the one authoritative work item and its explicitly configured repository lifecycle to a tracked defect.",
     parameters: Type.Object({ defectId: Type.String(), workItemId: Type.String(), workItemPath: Type.String(), status: Type.String(), lifecycleStates: Type.Array(Type.String()), adapter: Type.Optional(Type.String()) }),
-    async execute(_id, params, _signal, _update, ctx) { return json(await plane.assignWorkItem(params.defectId, { id: params.workItemId, path: params.workItemPath, status: params.status, lifecycleStates: params.lifecycleStates, adapter: params.adapter }, currentSessionId(ctx))); },
+    async execute(_id, params, _signal, _update, ctx) { return json(await afterTtrActivity(ctx, () => plane.assignWorkItem(params.defectId, { id: params.workItemId, path: params.workItemPath, status: params.status, lifecycleStates: params.lifecycleStates, adapter: params.adapter }, currentSessionId(ctx)))); },
   });
   pi.registerTool({
     name: "ttr_reassign_work_item", label: "Reassign Authoritative Work Item", description: "Replace an authoritative work item only as the active, addressed owner POC. The prior item is retained in immutable audit history with a required reason and evidence references.",
@@ -161,43 +213,46 @@ export default function triageControlPlane(pi: ExtensionAPI) {
   pi.registerTool({
     name: "ttr_transition_work_item", label: "Transition Work Item", description: "Record an authoritative work-item transition using only its configured lifecycle status; blockers and next action remain separate fields.",
     parameters: Type.Object({ defectId: Type.String(), status: Type.String(), blocker: Type.Optional(Type.String()), nextAction: Type.Optional(Type.String()) }),
-    async execute(_id, params) { return json(await plane.transitionWorkItem(params.defectId, params.status, { blocker: params.blocker, nextAction: params.nextAction })); },
+    async execute(_id, params, _signal, _update, ctx) { return json(await afterTtrActivity(ctx, () => plane.transitionWorkItem(params.defectId, params.status, { blocker: params.blocker, nextAction: params.nextAction }))); },
   });
   pi.registerTool({
     name: "ttr_prepare_work_lane", label: "Prepare TTR Work Lane", description: "Produce the mandatory authoritative-work-item reference for a diagnosis, review, validation, or implementation lane. Use this before launching a supported work lane.",
     parameters: Type.Object({ defectId: Type.String(), lane: StringEnum(["tracking", "diagnosis", "review", "validation", "implementation"] as const) }),
     async execute(_id, params, _signal, _update, ctx) {
-      const defect = await plane.ensurePocAuthority(params.defectId, currentSessionId(ctx));
-      if (!defect?.workItem) throw new Error(`Cannot prepare ${params.lane} lane: defect has no authoritative work item`);
-      return json({ defectId: defect.id, lane: params.lane, workItem: defect.workItem, requiredTaskPreamble: `Authoritative defect work item: ${defect.workItem.id} (${defect.workItem.path}). Link all artifacts, findings, and status updates to this work item. Do not create another work item.` });
+      const result = await afterTtrActivity(ctx, async () => {
+        const defect = await plane.ensurePocAuthority(params.defectId, currentSessionId(ctx));
+        if (!defect?.workItem) throw new Error(`Cannot prepare ${params.lane} lane: defect has no authoritative work item`);
+        return { defectId: defect.id, lane: params.lane, workItem: defect.workItem, requiredTaskPreamble: `Authoritative defect work item: ${defect.workItem.id} (${defect.workItem.path}). Link all artifacts, findings, and status updates to this work item. Do not create another work item.` };
+      });
+      return json(result);
     },
   });
   pi.registerTool({
     name: "ttr_record_evidence", label: "Record TTR Evidence", description: "Link validation, review, or other evidence to the authoritative defect work item.",
     parameters: Type.Object({ defectId: Type.String(), type: StringEnum(["validation", "review", "other"] as const), status: StringEnum(["passed", "failed", "recorded"] as const), path: Type.Optional(Type.String()) }),
-    async execute(_id, params) { return json(await plane.recordEvidence(params.defectId, params)); },
+    async execute(_id, params, _signal, _update, ctx) { return json(await afterTtrActivity(ctx, () => plane.recordEvidence(params.defectId, params))); },
   });
   pi.registerTool({
     name: "ttr_record_commit_evidence", label: "Record Commit Evidence", description: "Record the exact commit SHA only in linked commit evidence, never on the work item itself.",
     parameters: Type.Object({ defectId: Type.String(), sha: Type.String(), phase: StringEnum(["pre-deployment", "post-deployment", "other"] as const), path: Type.String() }),
-    async execute(_id, params) { return json(await plane.recordCommitEvidence(params.defectId, params)); },
+    async execute(_id, params, _signal, _update, ctx) { return json(await afterTtrActivity(ctx, () => plane.recordCommitEvidence(params.defectId, params))); },
   });
   pi.registerTool({
     name: "ttr_record_deployment_evidence", label: "Record Deployment Evidence", description: "Record an already-authorized deployment's artifact/version, receipt, and healthy verification. This tool never deploys.",
     parameters: Type.Object({ defectId: Type.String(), artifact: Type.String(), receipt: Type.String(), verification: Type.String() }),
-    async execute(_id, params) { return json(await plane.recordDeploymentEvidence(params.defectId, params)); },
+    async execute(_id, params, _signal, _update, ctx) { return json(await afterTtrActivity(ctx, () => plane.recordDeploymentEvidence(params.defectId, params))); },
   });
   pi.registerTool({
     name: "ttr_check_release_gate", label: "Check Release Gate", description: "Fail closed before a supported safe-to-proceed message: checks work item, clean Git tree, linked commit/validation/review evidence, and deployment finalization when required. It never deploys or publishes.",
     parameters: Type.Object({ defectId: Type.String(), deploymentRequired: Type.Boolean() }),
-    async execute(_id, params, _signal, _update, ctx) { return json(await withGit(ctx.cwd).checkReleaseGate(params.defectId, { deploymentRequired: params.deploymentRequired })); },
+    async execute(_id, params, _signal, _update, ctx) { return json(await afterTtrActivity(ctx, () => withGit(ctx.cwd).checkReleaseGate(params.defectId, { deploymentRequired: params.deploymentRequired }))); },
   });
   const requesterTool = (name: "ttr_requester_message" | "ttr_send_requester_message", label: string) => pi.registerTool({
     name, label, description: "Validate and record an allowed requester-facing message as evidence. It does not contact any external channel; delivery remains a separately authorized, established-channel action.",
     parameters: Type.Object({ defectId: Type.String(), category: StringEnum(REQUESTER_CATEGORIES), message: Type.String(), deploymentRequired: Type.Optional(Type.Boolean()) }),
     async execute(_id, params, _signal, _update, ctx) {
       const activePlane = params.category === "safe-to-proceed" ? withGit(ctx.cwd) : plane;
-      const evidence = await activePlane.recordRequesterMessage(params.defectId, params.category as RequesterMessageCategory, params.message, { deploymentRequired: params.deploymentRequired });
+      const evidence = await afterTtrActivity(ctx, () => activePlane.recordRequesterMessage(params.defectId, params.category as RequesterMessageCategory, params.message, { deploymentRequired: params.deploymentRequired }));
       return json({ evidence, delivery: "not-performed", boundary: "Use the established requester channel only after independent authorization; this extension has no external transport." });
     },
   });

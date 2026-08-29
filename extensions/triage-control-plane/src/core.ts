@@ -16,6 +16,8 @@ export type RequesterMessageCategory =
 
 export interface PocRecord {
   domain: string;
+  /** The first domain in a registration; aliases retain this canonical owner. */
+  canonicalDomain?: string;
   sessionId: string;
   projectBoundary?: string;
   requesterChannel?: string;
@@ -95,6 +97,8 @@ interface State {
   version: 1;
   registrations: Record<string, PocRecord>;
   defects: Record<string, Defect>;
+  /** Opt-in is per Pi session and persisted with the TTR control-plane state. */
+  namingOptIns?: Record<string, true>;
 }
 
 export interface IntakeInput {
@@ -200,7 +204,7 @@ export class TriageControlPlane {
       }
       const registeredAt = this.now();
       return keys.map((domain) => {
-        const record: PocRecord = { domain, sessionId: input.sessionId.trim(), ...(input.projectBoundary ? { projectBoundary: input.projectBoundary } : {}), ...(input.requesterChannel ? { requesterChannel: input.requesterChannel } : {}), registeredAt, active: true };
+        const record: PocRecord = { domain, canonicalDomain: keys[0]!, sessionId: input.sessionId.trim(), ...(input.projectBoundary ? { projectBoundary: input.projectBoundary } : {}), ...(input.requesterChannel ? { requesterChannel: input.requesterChannel } : {}), registeredAt, active: true };
         state.registrations[domain] = record;
         return record;
       });
@@ -211,6 +215,22 @@ export class TriageControlPlane {
     const state = await this.readState();
     const record = state.registrations[normalizedDomain(domain)];
     return record?.active ? clone(record) : undefined;
+  }
+
+  async setSessionNaming(sessionId: string, enabled: boolean): Promise<void> {
+    const key = sessionId.trim();
+    if (!key) throw new Error("Pi sessionId is required for session naming");
+    await this.transaction((state) => {
+      state.namingOptIns ??= {};
+      if (enabled) state.namingOptIns[key] = true;
+      else delete state.namingOptIns[key];
+      return null;
+    });
+  }
+
+  async isSessionNamingEnabled(sessionId: string): Promise<boolean> {
+    const state = await this.readState();
+    return state.namingOptIns?.[sessionId.trim()] === true;
   }
 
   async listPocs(includeInactive = false): Promise<PocRecord[]> {
