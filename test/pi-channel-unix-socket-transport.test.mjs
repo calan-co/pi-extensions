@@ -9,7 +9,7 @@ import { UnixChannelPublisher } from "../extensions/pi-channel/unix-socket-trans
 import { attachPiMembershipPublisher } from "../extensions/pi-channel/mirror-adapter.ts";
 import { publishPiMembership } from "../extensions/pi-channel/membership-source.ts";
 
-async function listener(socketPath, capability, received) {
+async function listener(socketPath, capability, received, membershipResponse) {
   const clients = new Set();
   const server = createServer(socket => {
     clients.add(socket);
@@ -25,7 +25,7 @@ async function listener(socketPath, capability, received) {
         if (message.type === "hello") {
           if (message.cap !== capability) return socket.end('{"v":1,"type":"error","code":"unauthorized"}\n');
         } else if (message.type === "membership") {
-          socket.write(`{"v":1,"type":"ack","seq":${message.seq}}\n`);
+          socket.write(membershipResponse ?? `{"v":1,"type":"ack","seq":${message.seq}}\n`);
         }
       }
     });
@@ -82,6 +82,30 @@ test("UnixChannelPublisher authenticates primitive Pi membership snapshots", asy
   }
   assert.match(received[1].epoch, /^[A-Za-z0-9_-]{22}$/);
   assert.equal(process.argv.includes(capability), false);
+});
+
+test("UnixChannelPublisher accepts fixed versioned relay errors and rejects malformed, unversioned, and unknown errors", async t => {
+  const cases = [
+    ['{"v":1,"type":"error","code":"invalid-frame"}\n', /local adapter rejected message: invalid-frame/],
+    ['{"type":"error","code":"invalid-frame"}\n', /local adapter returned invalid message/],
+    ['{"v":1,"type":"error","code":"unknown"}\n', /local adapter returned invalid message/],
+    ['not-json\n', /local adapter returned invalid JSON/],
+  ];
+
+  for (const [response, expected] of cases) {
+    const root = await mkdtemp(join(tmpdir(), "pi-channel-test-"));
+    await chmod(root, 0o700);
+    const socketPath = join(root, "socket");
+    const capability = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    await writeFile(join(root, "capability"), `${capability}\n`, { mode: 0o600 });
+    const received = [];
+    const server = await listener(socketPath, capability, received, response);
+    const value = publisher(socketPath);
+    await assert.rejects(value.snapshot(["ttr"]), expected);
+    assert.match(value.diagnostic().lastError, expected);
+    value.close();
+    await new Promise(resolve => server.close(resolve));
+  }
 });
 
 test("UnixChannelPublisher sends the canonical Pi session-file snapshot field", async t => {

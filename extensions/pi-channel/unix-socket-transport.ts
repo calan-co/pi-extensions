@@ -11,7 +11,21 @@ const CHANNEL = /^[a-z0-9][a-z0-9._/-]{0,63}$/;
 type Outbound =
   | { v: 1; type: "hello"; cap: string; role: "publisher"; source: string }
   | { v: 1; type: "membership"; piSessionId: string; piSessionFile: string | null; epoch: string; seq: number; channels: string[] };
-type Inbound = { v: 1; type: "ack"; seq: number } | { v: 1; type: "error"; code: "unauthorized" | "invalid" | "stale" } | { v: 1; type: "snapshot.request" };
+const RELAY_ERROR_CODES = [
+  "unauthorized",
+  "invalid",
+  "malformed-json",
+  "missing-channels",
+  "invalid-channel",
+  "invalid-epoch",
+  "invalid-sequence",
+  "stale-sequence",
+  "stale-epoch",
+  "source-mismatch",
+  "invalid-frame",
+] as const;
+type RelayErrorCode = typeof RELAY_ERROR_CODES[number];
+type Inbound = { v: 1; type: "ack"; seq: number } | { v: 1; type: "error"; code: RelayErrorCode } | { v: 1; type: "snapshot.request" };
 
 export interface UnixChannelPublisherOptions {
   /** Stable public Pi session identifier supplied by the Pi runtime. */
@@ -83,6 +97,10 @@ function encode(message: Outbound): string {
   return `${line}\n`;
 }
 
+function relayErrorCode(value: unknown): value is RelayErrorCode {
+  return typeof value === "string" && (RELAY_ERROR_CODES as readonly string[]).includes(value);
+}
+
 function parseInbound(line: string): Inbound {
   let message: unknown;
   try { message = JSON.parse(line); } catch { throw new Error("local adapter returned invalid JSON"); }
@@ -90,7 +108,7 @@ function parseInbound(line: string): Inbound {
   const value = message as Record<string, unknown>;
   if (value.v !== 1 || typeof value.type !== "string") throw new Error("local adapter returned invalid message");
   if (value.type === "ack" && typeof value.seq === "number" && Number.isSafeInteger(value.seq) && Object.keys(value).length === 3) return value as Inbound;
-  if (value.type === "error" && (value.code === "unauthorized" || value.code === "invalid" || value.code === "stale") && Object.keys(value).length === 3) return value as Inbound;
+  if (value.type === "error" && relayErrorCode(value.code) && Object.keys(value).length === 3) return value as Inbound;
   if (value.type === "snapshot.request" && Object.keys(value).length === 2) return value as Inbound;
   throw new Error("local adapter returned invalid message");
 }
