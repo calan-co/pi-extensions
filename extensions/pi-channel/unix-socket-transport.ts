@@ -23,6 +23,12 @@ const RELAY_ERROR_CODES = [
   "stale-epoch",
   "source-mismatch",
   "invalid-frame",
+  "invalid-protocol",
+  "invalid-schema",
+  "missing-pi-session-file",
+  "null-pi-session-file",
+  "invalid-pi-session-file",
+  "session-file-id-mismatch",
 ] as const;
 type RelayErrorCode = typeof RELAY_ERROR_CODES[number];
 type Inbound = { v: 1; type: "ack"; seq: number } | { v: 1; type: "error"; code: RelayErrorCode } | { v: 1; type: "snapshot.request" };

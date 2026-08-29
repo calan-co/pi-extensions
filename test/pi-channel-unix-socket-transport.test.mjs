@@ -84,9 +84,17 @@ test("UnixChannelPublisher authenticates primitive Pi membership snapshots", asy
   assert.equal(process.argv.includes(capability), false);
 });
 
-test("UnixChannelPublisher accepts fixed versioned relay errors and rejects malformed, unversioned, and unknown errors", async t => {
+test("UnixChannelPublisher accepts every fixed versioned relay rejection code and rejects malformed, unversioned, and unknown errors", async t => {
   const cases = [
-    ['{"v":1,"type":"error","code":"invalid-frame"}\n', /local adapter rejected message: invalid-frame/],
+    ...[
+      "invalid-frame",
+      "invalid-protocol",
+      "invalid-schema",
+      "missing-pi-session-file",
+      "null-pi-session-file",
+      "invalid-pi-session-file",
+      "session-file-id-mismatch",
+    ].map(code => [`{"v":1,"type":"error","code":"${code}"}\n`, new RegExp(`local adapter rejected message: ${code}`)]),
     ['{"type":"error","code":"invalid-frame"}\n', /local adapter returned invalid message/],
     ['{"v":1,"type":"error","code":"unknown"}\n', /local adapter returned invalid message/],
     ['not-json\n', /local adapter returned invalid JSON/],
