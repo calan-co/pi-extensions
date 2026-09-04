@@ -12,7 +12,7 @@ import {
 
 const root = new URL("..", import.meta.url);
 
-test("Zellij attention location requires inherited session and numeric pane values", () => {
+test("Zellij attention location requires relay-compatible session and positive pane values", () => {
   const previousSession = process.env.ZELLIJ_SESSION_NAME;
   const previousPane = process.env.ZELLIJ_PANE_ID;
   try {
@@ -22,6 +22,9 @@ test("Zellij attention location requires inherited session and numeric pane valu
     process.env.ZELLIJ_PANE_ID = "0";
     assert.equal(zellijLocationFromEnvironment(), null);
     process.env.ZELLIJ_PANE_ID = "not-a-pane";
+    assert.equal(zellijLocationFromEnvironment(), null);
+    process.env.ZELLIJ_PANE_ID = "1";
+    process.env.ZELLIJ_SESSION_NAME = "bad session";
     assert.equal(zellijLocationFromEnvironment(), null);
   } finally {
     if (previousSession === undefined) delete process.env.ZELLIJ_SESSION_NAME;

@@ -4,7 +4,7 @@ import { channelRecord, channelTranscriptSummary, parseChannelCommand, type PiCh
 import { attachPiMembershipPublisher, type MembershipPublisherHandle } from "./mirror-adapter.ts";
 import { publishPiMembership } from "./membership-source.ts";
 import { canonicalPiSessionFile, piSessionIdentity } from "./session-identity.ts";
-import { configuredUnixChannelSocketPath, type PiAttentionState, type ZellijLocation } from "./unix-socket-transport.ts";
+import { configuredUnixChannelSocketPath, validZellijLocation, type PiAttentionState, type ZellijLocation } from "./unix-socket-transport.ts";
 
 const publishers = new Map<string, MembershipPublisherHandle>();
 
@@ -54,8 +54,8 @@ export function zellijLocationFromEnvironment(): ZellijLocation | null {
   const sessionName = process.env.ZELLIJ_SESSION_NAME;
   const paneId = process.env.ZELLIJ_PANE_ID;
   if (!sessionName || !/^\d+$/.test(paneId ?? "")) return null;
-  const parsedPaneId = Number(paneId);
-  return Number.isSafeInteger(parsedPaneId) && parsedPaneId > 0 ? { sessionName, paneId: parsedPaneId } : null;
+  const location = { sessionName, paneId: Number(paneId) };
+  return validZellijLocation(location) ? location : null;
 }
 
 async function publishAttention(ctx: ExtensionContext, state: PiAttentionState): Promise<void> {

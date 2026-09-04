@@ -39,6 +39,12 @@ function publisher(socketPath) {
   return new UnixChannelPublisher({ piSessionId: "pi-session-123", piSessionFile: null, socketPath });
 }
 
+test("UnixChannelPublisher rejects invalid Zellij attention locations", async () => {
+  const value = publisher("/tmp/pi-channel-invalid-location.socket");
+  await assert.rejects(value.attention("waiting", { sessionName: "project", paneId: 0 }), /invalid Zellij location/);
+  await assert.rejects(value.attention("waiting", { sessionName: "bad session", paneId: 1 }), /invalid Zellij location/);
+});
+
 test("UnixChannelPublisher authenticates primitive Pi membership snapshots", async t => {
   const root = await mkdtemp(join(tmpdir(), "pi-channel-test-"));
   await chmod(root, 0o700);
@@ -94,6 +100,7 @@ test("UnixChannelPublisher accepts every fixed versioned relay rejection code an
       "null-pi-session-file",
       "invalid-pi-session-file",
       "session-file-id-mismatch",
+      "invalid-attention",
     ].map(code => [`{"v":1,"type":"error","code":"${code}"}\n`, new RegExp(`local adapter rejected message: ${code}`)]),
     ['{"type":"error","code":"invalid-frame"}\n', /local adapter returned invalid message/],
     ['{"v":1,"type":"error","code":"unknown"}\n', /local adapter returned invalid message/],

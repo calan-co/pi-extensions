@@ -36,6 +36,7 @@ const RELAY_ERROR_CODES = [
   "null-pi-session-file",
   "invalid-pi-session-file",
   "session-file-id-mismatch",
+  "invalid-attention",
 ] as const;
 type RelayErrorCode = typeof RELAY_ERROR_CODES[number];
 type Inbound = { v: 1; type: "ack"; seq: number } | { v: 1; type: "error"; code: RelayErrorCode } | { v: 1; type: "snapshot.request" };
@@ -68,9 +69,9 @@ function isAttentionState(value: unknown): value is PiAttentionState {
   return value === "active" || value === "waiting" || value === "cleared";
 }
 
-function validZellijLocation(value: ZellijLocation | null): boolean {
-  return value === null || (typeof value.sessionName === "string" && value.sessionName.length > 0 && value.sessionName.length <= 128
-    && Number.isSafeInteger(value.paneId) && value.paneId >= 0);
+export function validZellijLocation(value: ZellijLocation | null): boolean {
+  return value === null || (typeof value.sessionName === "string" && SOURCE.test(value.sessionName)
+    && Number.isSafeInteger(value.paneId) && value.paneId > 0 && value.paneId <= 0xffff_ffff);
 }
 
 /** Resolves a non-secret socket location. The relay is the only process that creates it. */
