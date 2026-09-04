@@ -8,9 +8,16 @@ const MAX_LINE_BYTES = 64 * 1024;
 const SOURCE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const CHANNEL = /^[a-z0-9][a-z0-9._/-]{0,63}$/;
 
+export type PiAttentionState = "active" | "waiting" | "cleared";
+export interface ZellijLocation {
+  sessionName: string;
+  paneId: number;
+}
+
 type Outbound =
   | { v: 1; type: "hello"; cap: string; role: "publisher"; source: string }
-  | { v: 1; type: "membership"; piSessionId: string; piSessionFile: string | null; epoch: string; seq: number; channels: string[] };
+  | { v: 1; type: "membership"; piSessionId: string; piSessionFile: string | null; epoch: string; seq: number; channels: string[] }
+  | { v: 1; type: "attention"; piSessionId: string; piSessionFile: string | null; epoch: string; seq: number; state: PiAttentionState; zellijLocation: ZellijLocation | null };
 const RELAY_ERROR_CODES = [
   "unauthorized",
   "invalid",
@@ -55,6 +62,15 @@ export function normalizeMembershipChannels(channels: readonly string[]): string
   const values = [...new Set(channels.map(channel => channel.trim().toLowerCase()).filter(Boolean))].sort();
   if (values.some(channel => !CHANNEL.test(channel))) throw new Error("invalid channel name for local adapter");
   return values;
+}
+
+function isAttentionState(value: unknown): value is PiAttentionState {
+  return value === "active" || value === "waiting" || value === "cleared";
+}
+
+function validZellijLocation(value: ZellijLocation | null): boolean {
+  return value === null || (typeof value.sessionName === "string" && value.sessionName.length > 0 && value.sessionName.length <= 128
+    && Number.isSafeInteger(value.paneId) && value.paneId >= 0);
 }
 
 /** Resolves a non-secret socket location. The relay is the only process that creates it. */
@@ -130,6 +146,7 @@ export class UnixChannelPublisher {
   private readonly epoch = randomBytes(16).toString("base64url");
   private sequence = 0;
   private channels: string[] = [];
+  private attentionState?: { state: PiAttentionState; zellijLocation: ZellijLocation | null };
   private started = false;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private reconnectDelayMs = 50;
@@ -169,6 +186,23 @@ export class UnixChannelPublisher {
     const normalized = normalizeMembershipChannels([channel])[0];
     const next = op === "join" ? [...this.channels, normalized] : this.channels.filter(current => current !== normalized);
     await this.snapshot(next);
+  }
+
+  /** Publishes transient agent attention; it never writes Pi session history. */
+  async attention(state: PiAttentionState, zellijLocation: ZellijLocation | null): Promise<void> {
+    if (!isAttentionState(state)) throw new Error("invalid attention state for local adapter");
+    if (!validZellijLocation(zellijLocation)) throw new Error("invalid Zellij location for local adapter");
+    this.attentionState = { state, zellijLocation };
+    this.started = true;
+    try {
+      const reconnected = await this.ensureConnected();
+      if (!reconnected) await this.sendAttention();
+    } catch (error) {
+      this.rememberError(error);
+      this.dropSocket();
+      this.scheduleReconnect();
+      throw error;
+    }
   }
 
   close(): void {
@@ -241,8 +275,9 @@ export class UnixChannelPublisher {
       this.pending = undefined;
     });
     await this.send({ v: 1, type: "hello", cap: capability, role: "publisher", source: this.piSessionId }, false);
-    // A new socket/restart has no cache; replay the complete Pi membership snapshot.
+    // A new socket/restart has no cache; replay complete transient state too.
     await this.sendMembership();
+    if (this.attentionState) await this.sendAttention();
     return true;
   }
 
@@ -260,6 +295,21 @@ export class UnixChannelPublisher {
     }, true, () => {
       this.lastPublish = { at: new Date().toISOString(), seq, channels };
       this.lastError = null;
+    });
+  }
+
+  private async sendAttention(): Promise<void> {
+    const attention = this.attentionState;
+    if (!attention) return;
+    await this.send({
+      v: 1,
+      type: "attention",
+      piSessionId: this.piSessionId,
+      piSessionFile: this.piSessionFile,
+      epoch: this.epoch,
+      seq: ++this.sequence,
+      state: attention.state,
+      zellijLocation: attention.zellijLocation,
     });
   }
 
@@ -287,7 +337,7 @@ export class UnixChannelPublisher {
         const message = parseInbound(line);
         if (message.type === "error") throw new Error(`local adapter rejected message: ${message.code}`);
         if (message.type === "snapshot.request") {
-          void this.sendMembership().catch(() => this.dropSocket());
+          void this.sendMembership().then(() => this.sendAttention()).catch(() => this.dropSocket());
           continue;
         }
         if (!this.pending || message.seq !== this.pending.seq) throw new Error("local adapter returned unexpected acknowledgement");

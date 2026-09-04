@@ -55,6 +55,17 @@ checks the stored equality and waits for a fresh authenticated publisher
 snapshot; partial IDs, display names, aliases, and arbitrary metadata never
 match.
 
+## Transient attention publisher
+
+The same authenticated local publisher sends version-1 `attention` frames at
+`agent_start` (`active`), `agent_settled` (`waiting`), and `session_shutdown`
+(`cleared`). Each frame has only the Pi session ID/file, publisher epoch and
+sequence, state, and `zellijLocation`. The location is
+`{sessionName, paneId}` only when inherited `ZELLIJ_SESSION_NAME` and numeric
+`ZELLIJ_PANE_ID` are both available; otherwise it is `null`. Attention never
+creates or changes durable `pi-channel` membership entries and never includes
+a tab, prompt, reason, transcript, or tool output.
+
 Each snapshot also includes `piSessionFile`: `realpath()` resolves it before
 publication, or it is `null` when unavailable. For distinct IDs, this remains
 the optional secondary path: the relay independently canonicalizes paired stock

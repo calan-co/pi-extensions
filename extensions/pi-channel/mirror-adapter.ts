@@ -1,5 +1,5 @@
 import { currentPiMembership, subscribePiMembership, type PiMembershipSnapshot } from "./membership-source.ts";
-import { UnixChannelPublisher, type UnixChannelPublisherDiagnostic } from "./unix-socket-transport.ts";
+import { UnixChannelPublisher, type PiAttentionState, type UnixChannelPublisherDiagnostic, type ZellijLocation } from "./unix-socket-transport.ts";
 
 export interface PiMembershipAssociation {
   /** Stable public Pi session identifier supplied by the Pi runtime. */
@@ -10,13 +10,16 @@ export interface PiMembershipAssociation {
 
 export interface MembershipPublisher {
   snapshot(channels: readonly string[], piSessionFile: string | null): Promise<void>;
+  attention?(state: PiAttentionState, zellijLocation: ZellijLocation | null): Promise<void>;
   close?(): void;
   diagnostic?(): UnixChannelPublisherDiagnostic;
 }
 
 export interface MembershipPublisherHandle {
-  /** Wait for membership work queued before this call. Useful at lifecycle shutdown/tests. */
+  /** Wait for local publishing work queued before this call. Useful at lifecycle shutdown/tests. */
   flush(): Promise<void>;
+  /** Publishes transient attention without touching durable Pi membership records. */
+  attention(state: PiAttentionState, zellijLocation: ZellijLocation | null): Promise<void>;
   close(): void;
   /** Safe-to-display publisher state; it never contains the socket capability. */
   diagnostic(): UnixChannelPublisherDiagnostic | null;
@@ -48,6 +51,12 @@ export function attachPiMembershipPublisher(
 
   return {
     flush: () => pending,
+    attention: (state, zellijLocation) => {
+      pending = pending.catch(() => undefined).then(async () => {
+        if (!closed) await publisher.attention?.(state, zellijLocation);
+      });
+      return pending;
+    },
     diagnostic: () => publisher.diagnostic?.() ?? null,
     close: () => {
       if (closed) return;

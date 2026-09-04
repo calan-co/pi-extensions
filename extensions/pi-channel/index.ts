@@ -4,7 +4,7 @@ import { channelRecord, channelTranscriptSummary, parseChannelCommand, type PiCh
 import { attachPiMembershipPublisher, type MembershipPublisherHandle } from "./mirror-adapter.ts";
 import { publishPiMembership } from "./membership-source.ts";
 import { canonicalPiSessionFile, piSessionIdentity } from "./session-identity.ts";
-import { configuredUnixChannelSocketPath } from "./unix-socket-transport.ts";
+import { configuredUnixChannelSocketPath, type PiAttentionState, type ZellijLocation } from "./unix-socket-transport.ts";
 
 const publishers = new Map<string, MembershipPublisherHandle>();
 
@@ -49,6 +49,25 @@ async function publishMembership(ctx: ExtensionContext, channels: readonly strin
   publishPiMembership({ piSessionId, piSessionFile, channels });
 }
 
+/** Uses only inherited Zellij coordinates; no tab or terminal content is read. */
+export function zellijLocationFromEnvironment(): ZellijLocation | null {
+  const sessionName = process.env.ZELLIJ_SESSION_NAME;
+  const paneId = process.env.ZELLIJ_PANE_ID;
+  if (!sessionName || !/^\d+$/.test(paneId ?? "")) return null;
+  const parsedPaneId = Number(paneId);
+  return Number.isSafeInteger(parsedPaneId) && parsedPaneId >= 0 ? { sessionName, paneId: parsedPaneId } : null;
+}
+
+async function publishAttention(ctx: ExtensionContext, state: PiAttentionState): Promise<void> {
+  const publisher = await sessionPublisher(ctx);
+  if (!publisher) return;
+  try {
+    await publisher.attention(state, zellijLocationFromEnvironment());
+  } catch {
+    // The optional local relay cannot block Pi agent lifecycle events.
+  }
+}
+
 /** JSON is deliberate: it makes a support capture complete while excluding the capability. */
 async function publisherDiagnostic(ctx: ExtensionContext): Promise<string> {
   const publisher = await sessionPublisher(ctx);
@@ -73,6 +92,15 @@ export default function piChannel(pi: ExtensionAPI) {
   // verified Pi-to-stock-Oppi association and remains independent of this command.
   pi.on?.("session_start", async (_event, ctx) => {
     await publishMembership(ctx, activeChannels(ctx));
+  });
+  pi.on?.("agent_start", async (_event, ctx) => {
+    await publishAttention(ctx, "active");
+  });
+  pi.on?.("agent_settled", async (_event, ctx) => {
+    await publishAttention(ctx, "waiting");
+  });
+  pi.on?.("session_shutdown", async (_event, ctx) => {
+    await publishAttention(ctx, "cleared");
   });
 
   pi.registerCommand("channel", {

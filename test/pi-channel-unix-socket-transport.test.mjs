@@ -24,7 +24,7 @@ async function listener(socketPath, capability, received, membershipResponse) {
         received.push(message);
         if (message.type === "hello") {
           if (message.cap !== capability) return socket.end('{"v":1,"type":"error","code":"unauthorized"}\n');
-        } else if (message.type === "membership") {
+        } else if (message.type === "membership" || message.type === "attention") {
           socket.write(membershipResponse ?? `{"v":1,"type":"ack","seq":${message.seq}}\n`);
         }
       }
@@ -156,6 +156,75 @@ test("lifecycle hook emits no Oppi association through the authenticated transpo
   assert.equal(received[1].piSessionId, "pi-mirror-session-123");
   assert.equal(Object.hasOwn(received[1], "oppiSessionId"), false);
   assert.deepEqual(received[1].channels, ["ttr"]);
+});
+
+test("attention lifecycle publishes transient state with inherited Zellij location", async t => {
+  const root = await mkdtemp(join(tmpdir(), "pi-channel-attention-"));
+  await chmod(root, 0o700);
+  const socketPath = join(root, "attention.socket");
+  const capability = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  await writeFile(join(root, "capability"), `${capability}\n`, { mode: 0o600 });
+  const received = [];
+  const server = await listener(socketPath, capability, received);
+  t.after(() => server.close());
+  const script = `
+    import piChannel from './extensions/pi-channel/index.ts';
+    const events = new Map();
+    piChannel({
+      appendEntry() { throw new Error('attention must not create durable membership'); },
+      registerCommand() {},
+      on(name, handler) { events.set(name, handler); },
+    });
+    const ctx = {
+      ui: { notify() {} },
+      sessionManager: { getSessionId: () => 'attention-session-123', getBranch: () => [] },
+    };
+    await events.get('agent_start')({}, ctx);
+    await events.get('agent_settled')({}, ctx);
+    await events.get('session_shutdown')({}, ctx);
+    process.exit(0);
+  `;
+  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], {
+    cwd: new URL("..", import.meta.url),
+    env: { ...process.env, PI_CHANNEL_SOCKET_PATH: socketPath, ZELLIJ_SESSION_NAME: "project", ZELLIJ_PANE_ID: "42" },
+  });
+  const stderr = [];
+  child.stderr.on("data", value => stderr.push(value));
+  await new Promise((resolve, reject) => child.once("exit", code => code === 0 ? resolve() : reject(new Error(Buffer.concat(stderr).toString()))));
+
+  const attention = received.filter(message => message.type === "attention");
+  assert.deepEqual(attention.map(message => message.state), ["active", "waiting", "cleared"]);
+  assert.deepEqual(attention.map(message => message.zellijLocation), [
+    { sessionName: "project", paneId: 42 },
+    { sessionName: "project", paneId: 42 },
+    { sessionName: "project", paneId: 42 },
+  ]);
+  for (const [index, message] of attention.entries()) {
+    assert.deepEqual(Object.keys(message).sort(), ["epoch", "piSessionFile", "piSessionId", "seq", "state", "type", "v", "zellijLocation"]);
+    assert.equal(message.v, 1);
+    assert.equal(message.piSessionId, "attention-session-123");
+    assert.equal(message.piSessionFile, null);
+    assert.equal(message.seq, index + 2);
+    assert.equal(message.epoch, attention[0].epoch);
+  }
+  assert.equal(received.some(message => message.type === "membership" && Object.hasOwn(message, "state")), false);
+});
+
+test("attention publishes null Zellij location without complete valid inherited values", async t => {
+  const root = await mkdtemp(join(tmpdir(), "pi-channel-attention-"));
+  await chmod(root, 0o700);
+  const socketPath = join(root, "attention.socket");
+  const capability = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  await writeFile(join(root, "capability"), `${capability}\n`, { mode: 0o600 });
+  const received = [];
+  const server = await listener(socketPath, capability, received);
+  t.after(() => server.close());
+
+  const value = publisher(socketPath);
+  t.after(() => value.close());
+  await value.attention("active", null);
+  assert.equal(received.at(-1).type, "attention");
+  assert.equal(received.at(-1).zellijLocation, null);
 });
 
 test("the production /channel entrypoint publishes a membership snapshot through the real socket", async t => {

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import piChannel from "../extensions/pi-channel/index.ts";
+import piChannel, { zellijLocationFromEnvironment } from "../extensions/pi-channel/index.ts";
 import { channelRecord, channelTranscriptSummary, parseChannelCommand } from "../extensions/pi-channel/channel.ts";
 import {
   channelEvent,
@@ -11,6 +11,23 @@ import {
 } from "../extensions/pi-channel/transport.ts";
 
 const root = new URL("..", import.meta.url);
+
+test("Zellij attention location requires inherited session and numeric pane values", () => {
+  const previousSession = process.env.ZELLIJ_SESSION_NAME;
+  const previousPane = process.env.ZELLIJ_PANE_ID;
+  try {
+    process.env.ZELLIJ_SESSION_NAME = "project";
+    process.env.ZELLIJ_PANE_ID = "42";
+    assert.deepEqual(zellijLocationFromEnvironment(), { sessionName: "project", paneId: 42 });
+    process.env.ZELLIJ_PANE_ID = "not-a-pane";
+    assert.equal(zellijLocationFromEnvironment(), null);
+  } finally {
+    if (previousSession === undefined) delete process.env.ZELLIJ_SESSION_NAME;
+    else process.env.ZELLIJ_SESSION_NAME = previousSession;
+    if (previousPane === undefined) delete process.env.ZELLIJ_PANE_ID;
+    else process.env.ZELLIJ_PANE_ID = previousPane;
+  }
+});
 
 test("pi-channel records normalize names and preserve operation", () => {
   assert.deepEqual(channelRecord("join", " TTR ", "ttr"), { version: 1, op: "join", channel: "ttr", source: "ttr" });
