@@ -56,6 +56,8 @@ cd "$PI_EXTENSIONS"
 pnpm install --frozen-lockfile
 pnpm check
 pnpm test -- test/pi-channel-unix-socket-transport.test.mjs
+# Attention validation: full suite passed when this runbook was updated.
+pnpm test
 
 cd "$OPPI_ZELLIJ"
 cargo clean
@@ -335,6 +337,7 @@ Clean-checkout or worktree location: <redacted path>
 Build/static commands and exit status:
 - pnpm check: <status + output reference>
 - pnpm test -- test/pi-channel-unix-socket-transport.test.mjs: <status + output reference>
+- pnpm test (attention validation; passed at this runbook update): <status + output reference>
 - ./build.sh and cargo test --target "$HOST_TARGET" --features relay: <status + output reference>
 
 Pairing recovery:
