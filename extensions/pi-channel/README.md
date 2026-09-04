@@ -22,6 +22,14 @@ state, last acknowledged membership publish, and its last error. It never
 prints the local capability. The command owns only Pi membership: it never
 reads an Oppi identifier, display name, or relay state.
 
+## Timeline projection, not a live relay
+
+Pi renders each durable `pi-channel` entry as a bounded joined/left channel
+summary. The renderer ignores all non-membership fields, including paths and
+tokens, and does not alter the version-1 custom entry data. This transcript
+projection is local Pi history, not an Oppi activity feed: it does not route
+messages, map sessions, or show live relay state.
+
 ## Local membership publisher
 
 The production extension activates its local publisher for every Pi session.

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import piChannel from "../extensions/pi-channel/index.ts";
-import { channelRecord, parseChannelCommand } from "../extensions/pi-channel/channel.ts";
+import { channelRecord, channelTranscriptSummary, parseChannelCommand } from "../extensions/pi-channel/channel.ts";
 import {
   channelEvent,
   InProcessChannelTransport,
@@ -22,6 +22,25 @@ test("channel command accepts join leave list and diagnostics only", () => {
   assert.deepEqual(parseChannelCommand("list"), { action: "list" });
   assert.deepEqual(parseChannelCommand("diagnostics"), { action: "diagnostics" });
   assert.throws(() => parseChannelCommand("join"), /Usage/);
+});
+
+test("pi-channel registers a bounded durable transcript projection", () => {
+  const renderers = new Map();
+  piChannel({ appendEntry() {}, registerCommand() {}, registerEntryRenderer(type, renderer) { renderers.set(type, renderer); } });
+  assert.ok(renderers.has("pi-channel"));
+
+  const summary = channelTranscriptSummary({
+    version: 1,
+    op: "join",
+    channel: "ops-".repeat(20),
+    source: "pi-channel",
+    sessionFile: "/private/session.jsonl",
+    token: "do-not-display",
+  });
+  assert.match(summary, /^Channel joined: /);
+  assert.ok(summary.length <= 64);
+  assert.doesNotMatch(summary, /private|do-not-display|sessionFile|token/);
+  assert.equal(channelTranscriptSummary({ path: "/private/session.jsonl", token: "do-not-display" }), "Channel membership activity");
 });
 
 test("pi-channel is packaged, appends durable membership records, and lists the active branch", async () => {

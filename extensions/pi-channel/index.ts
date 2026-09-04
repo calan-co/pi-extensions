@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { channelRecord, parseChannelCommand, type PiChannelRecord } from "./channel.ts";
+import { Text } from "@earendil-works/pi-tui";
+import { channelRecord, channelTranscriptSummary, parseChannelCommand, type PiChannelRecord } from "./channel.ts";
 import { attachPiMembershipPublisher, type MembershipPublisherHandle } from "./mirror-adapter.ts";
 import { publishPiMembership } from "./membership-source.ts";
 import { canonicalPiSessionFile, piSessionIdentity } from "./session-identity.ts";
@@ -65,6 +66,9 @@ async function publisherDiagnostic(ctx: ExtensionContext): Promise<string> {
 
 /** Durable `/channel` membership is primitive Pi session state only. */
 export default function piChannel(pi: ExtensionAPI) {
+  // The durable entry remains Pi-owned; this is display-only and never projects relay data.
+  pi.registerEntryRenderer?.<PiChannelRecord>("pi-channel", entry => new Text(channelTranscriptSummary(entry.data), 0, 0));
+
   // The local publisher sends only primitive snapshots; the relay owns any
   // verified Pi-to-stock-Oppi association and remains independent of this command.
   pi.on?.("session_start", async (_event, ctx) => {
