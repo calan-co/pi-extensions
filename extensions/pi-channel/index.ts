@@ -55,7 +55,7 @@ export function zellijLocationFromEnvironment(): ZellijLocation | null {
   const paneId = process.env.ZELLIJ_PANE_ID;
   if (!sessionName || !/^\d+$/.test(paneId ?? "")) return null;
   const parsedPaneId = Number(paneId);
-  return Number.isSafeInteger(parsedPaneId) && parsedPaneId >= 0 ? { sessionName, paneId: parsedPaneId } : null;
+  return Number.isSafeInteger(parsedPaneId) && parsedPaneId > 0 ? { sessionName, paneId: parsedPaneId } : null;
 }
 
 async function publishAttention(ctx: ExtensionContext, state: PiAttentionState): Promise<void> {
