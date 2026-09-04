@@ -59,10 +59,12 @@ export function zellijLocationFromEnvironment(): ZellijLocation | null {
 }
 
 async function publishAttention(ctx: ExtensionContext, state: PiAttentionState): Promise<void> {
+  const location = state === "waiting" ? zellijLocationFromEnvironment() : null;
+  if (state === "waiting" && !location) return;
   const publisher = await sessionPublisher(ctx);
   if (!publisher) return;
   try {
-    await publisher.attention(state, state === "waiting" ? zellijLocationFromEnvironment() : null);
+    await publisher.attention(state, location);
   } catch {
     // The optional local relay cannot block Pi agent lifecycle events.
   }

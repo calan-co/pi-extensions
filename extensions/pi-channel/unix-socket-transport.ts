@@ -197,7 +197,7 @@ export class UnixChannelPublisher {
   /** Publishes transient agent attention; it never writes Pi session history. */
   async attention(state: PiAttentionState, zellijLocation: ZellijLocation | null): Promise<void> {
     if (!isAttentionState(state)) throw new Error("invalid attention state for local adapter");
-    if (!validZellijLocation(zellijLocation)) throw new Error("invalid Zellij location for local adapter");
+    if (!validZellijLocation(zellijLocation) || (state === "waiting" && zellijLocation === null)) throw new Error("invalid Zellij location for local adapter");
     this.attentionState = { state, location: state === "waiting" ? zellijLocation : null };
     this.started = true;
     try {

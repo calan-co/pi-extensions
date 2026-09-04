@@ -59,10 +59,10 @@ match.
 
 The same authenticated local publisher sends relay `attention` frames at
 `agent_start` (`active`), `agent_settled` (`waiting`), and `session_shutdown`
-(`cleared`): `{v,type:"attention",state,location}`. The location is
-`{zellijSessionName, zellijPaneId}` only for `waiting` when inherited
-`ZELLIJ_SESSION_NAME` and numeric `ZELLIJ_PANE_ID` are both available;
-otherwise it is `null`. Attention never creates or changes durable
+(`cleared`): `{v,type:"attention",state,location}`. `waiting` is sent only
+when inherited `ZELLIJ_SESSION_NAME` and numeric `ZELLIJ_PANE_ID` form a valid
+`{zellijSessionName, zellijPaneId}` location; otherwise it is skipped. `active`
+and `cleared` use a `null` location. Attention never creates or changes durable
 `pi-channel` membership entries and never includes a Pi identity, epoch,
 sequence, tab, prompt, reason, transcript, or tool output.
 

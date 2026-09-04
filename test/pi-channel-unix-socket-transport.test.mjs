@@ -41,8 +41,9 @@ function publisher(socketPath) {
   return new UnixChannelPublisher({ piSessionId: "pi-session-123", piSessionFile: null, socketPath });
 }
 
-test("UnixChannelPublisher rejects invalid Zellij attention locations", async () => {
+test("UnixChannelPublisher rejects waiting attention without a valid Zellij location", async () => {
   const value = publisher("/tmp/pi-channel-invalid-location.socket");
+  await assert.rejects(value.attention("waiting", null), /invalid Zellij location/);
   await assert.rejects(value.attention("waiting", { zellijSessionName: "project", zellijPaneId: 0 }), /invalid Zellij location/);
   await assert.rejects(value.attention("waiting", { zellijSessionName: "bad session", zellijPaneId: 1 }), /invalid Zellij location/);
 });
@@ -167,7 +168,7 @@ test("lifecycle hook emits no Oppi association through the authenticated transpo
   assert.deepEqual(received[1].channels, ["ttr"]);
 });
 
-test("attention lifecycle emits exact relay envelopes and accepts bare attention ACKs", async t => {
+test("attention lifecycle emits exact relay envelopes and skips waiting without a Zellij location", async t => {
   const root = await mkdtemp(join(tmpdir(), "pi-channel-attention-"));
   await chmod(root, 0o700);
   const socketPath = join(root, "attention.socket");
@@ -208,9 +209,31 @@ test("attention lifecycle emits exact relay envelopes and accepts bare attention
     { v: 1, type: "attention", state: "cleared", location: null },
   ]);
   assert.equal(received.some(message => message.type === "membership" && Object.hasOwn(message, "state")), false);
+
+  const missingZellijEnv = { ...process.env, PI_CHANNEL_SOCKET_PATH: socketPath };
+  delete missingZellijEnv.ZELLIJ_SESSION_NAME;
+  delete missingZellijEnv.ZELLIJ_PANE_ID;
+  const skippedWaitingScript = `
+    import piChannel from './extensions/pi-channel/index.ts';
+    const events = new Map();
+    piChannel({ appendEntry() {}, registerCommand() {}, on(name, handler) { events.set(name, handler); } });
+    const ctx = { sessionManager: { getSessionId: () => 'missing-location-session-123', getBranch: () => [] } };
+    await events.get('agent_start')({}, ctx);
+    await events.get('agent_settled')({}, ctx);
+    await events.get('session_shutdown')({}, ctx);
+    process.exit(0);
+  `;
+  const skippedWaitingChild = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", skippedWaitingScript], {
+    cwd: new URL("..", import.meta.url), env: missingZellijEnv,
+  });
+  await new Promise((resolve, reject) => skippedWaitingChild.once("exit", code => code === 0 ? resolve() : reject(new Error(`Pi process exited ${code}`))));
+  assert.deepEqual(received.filter(message => message.type === "attention").slice(3), [
+    { v: 1, type: "attention", state: "active", location: null },
+    { v: 1, type: "attention", state: "cleared", location: null },
+  ]);
 });
 
-test("attention publishes null Zellij location without complete valid inherited values", async t => {
+test("attention publishes null Zellij location for active lifecycle frames", async t => {
   const root = await mkdtemp(join(tmpdir(), "pi-channel-attention-"));
   await chmod(root, 0o700);
   const socketPath = join(root, "attention.socket");
