@@ -10,14 +10,14 @@ const CHANNEL = /^[a-z0-9][a-z0-9._/-]{0,63}$/;
 
 export type PiAttentionState = "active" | "waiting" | "cleared";
 export interface ZellijLocation {
-  sessionName: string;
-  paneId: number;
+  zellijSessionName: string;
+  zellijPaneId: number;
 }
 
 type Outbound =
   | { v: 1; type: "hello"; cap: string; role: "publisher"; source: string }
   | { v: 1; type: "membership"; piSessionId: string; piSessionFile: string | null; epoch: string; seq: number; channels: string[] }
-  | { v: 1; type: "attention"; piSessionId: string; piSessionFile: string | null; epoch: string; seq: number; state: PiAttentionState; zellijLocation: ZellijLocation | null };
+  | { v: 1; type: "attention"; state: PiAttentionState; location: ZellijLocation | null };
 const RELAY_ERROR_CODES = [
   "unauthorized",
   "invalid",
@@ -39,7 +39,11 @@ const RELAY_ERROR_CODES = [
   "invalid-attention",
 ] as const;
 type RelayErrorCode = typeof RELAY_ERROR_CODES[number];
-type Inbound = { v: 1; type: "ack"; seq: number } | { v: 1; type: "error"; code: RelayErrorCode } | { v: 1; type: "snapshot.request" };
+type Inbound =
+  | { v: 1; type: "ack"; seq: number }
+  | { v: 1; type: "ack" }
+  | { v: 1; type: "error"; code: RelayErrorCode }
+  | { v: 1; type: "snapshot.request" };
 
 export interface UnixChannelPublisherOptions {
   /** Stable public Pi session identifier supplied by the Pi runtime. */
@@ -70,8 +74,8 @@ function isAttentionState(value: unknown): value is PiAttentionState {
 }
 
 export function validZellijLocation(value: ZellijLocation | null): boolean {
-  return value === null || (typeof value.sessionName === "string" && SOURCE.test(value.sessionName)
-    && Number.isSafeInteger(value.paneId) && value.paneId > 0 && value.paneId <= 0xffff_ffff);
+  return value === null || (typeof value.zellijSessionName === "string" && SOURCE.test(value.zellijSessionName)
+    && Number.isSafeInteger(value.zellijPaneId) && value.zellijPaneId > 0 && value.zellijPaneId <= 0xffff_ffff);
 }
 
 /** Resolves a non-secret socket location. The relay is the only process that creates it. */
@@ -130,6 +134,7 @@ function parseInbound(line: string): Inbound {
   if (!message || typeof message !== "object" || Array.isArray(message)) throw new Error("local adapter returned invalid message");
   const value = message as Record<string, unknown>;
   if (value.v !== 1 || typeof value.type !== "string") throw new Error("local adapter returned invalid message");
+  if (value.type === "ack" && Object.keys(value).length === 2) return value as Inbound;
   if (value.type === "ack" && typeof value.seq === "number" && Number.isSafeInteger(value.seq) && Object.keys(value).length === 3) return value as Inbound;
   if (value.type === "error" && relayErrorCode(value.code) && Object.keys(value).length === 3) return value as Inbound;
   if (value.type === "snapshot.request" && Object.keys(value).length === 2) return value as Inbound;
@@ -147,13 +152,13 @@ export class UnixChannelPublisher {
   private readonly epoch = randomBytes(16).toString("base64url");
   private sequence = 0;
   private channels: string[] = [];
-  private attentionState?: { state: PiAttentionState; zellijLocation: ZellijLocation | null };
+  private attentionState?: { state: PiAttentionState; location: ZellijLocation | null };
   private started = false;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private reconnectDelayMs = 50;
   private lastPublish: UnixChannelPublisherDiagnostic["lastPublish"] = null;
   private lastError: string | null = null;
-  private pending?: { seq: number; resolve: () => void; reject: (error: Error) => void; onAck?: () => void };
+  private pending?: { seq?: number; resolve: () => void; reject: (error: Error) => void; onAck?: () => void };
 
   constructor(options: UnixChannelPublisherOptions) {
     if (!SOURCE.test(options.piSessionId)) throw new Error("local adapter Pi session identity is invalid");
@@ -193,7 +198,7 @@ export class UnixChannelPublisher {
   async attention(state: PiAttentionState, zellijLocation: ZellijLocation | null): Promise<void> {
     if (!isAttentionState(state)) throw new Error("invalid attention state for local adapter");
     if (!validZellijLocation(zellijLocation)) throw new Error("invalid Zellij location for local adapter");
-    this.attentionState = { state, zellijLocation };
+    this.attentionState = { state, location: state === "waiting" ? zellijLocation : null };
     this.started = true;
     try {
       const reconnected = await this.ensureConnected();
@@ -293,7 +298,7 @@ export class UnixChannelPublisher {
       epoch: this.epoch,
       seq,
       channels,
-    }, true, () => {
+    }, "membership", () => {
       this.lastPublish = { at: new Date().toISOString(), seq, channels };
       this.lastError = null;
     });
@@ -305,22 +310,18 @@ export class UnixChannelPublisher {
     await this.send({
       v: 1,
       type: "attention",
-      piSessionId: this.piSessionId,
-      piSessionFile: this.piSessionFile,
-      epoch: this.epoch,
-      seq: ++this.sequence,
       state: attention.state,
-      zellijLocation: attention.zellijLocation,
-    });
+      location: attention.location,
+    }, "attention");
   }
 
-  private send(message: Outbound, awaitAck = true, onAck?: () => void): Promise<void> {
+  private send(message: Outbound, acknowledgement: false | "membership" | "attention" = "membership", onAck?: () => void): Promise<void> {
     if (!this.socket || this.socket.destroyed) return Promise.reject(new Error("local adapter socket is unavailable"));
-    if (!awaitAck) { this.socket.write(encode(message)); return Promise.resolve(); }
-    const seq = "seq" in message ? message.seq : undefined;
-    if (seq === undefined || this.pending) return Promise.reject(new Error("local adapter protocol state is invalid"));
+    if (!acknowledgement) { this.socket.write(encode(message)); return Promise.resolve(); }
+    const seq = acknowledgement === "membership" && "seq" in message ? message.seq : undefined;
+    if ((acknowledgement === "membership" && seq === undefined) || this.pending) return Promise.reject(new Error("local adapter protocol state is invalid"));
     return new Promise((resolve, reject) => {
-      this.pending = { seq, resolve, reject, onAck };
+      this.pending = { seq: acknowledgement === "attention" ? undefined : seq, resolve, reject, onAck };
       this.socket!.write(encode(message), error => {
         if (error) { this.pending = undefined; reject(error); }
       });
@@ -341,7 +342,7 @@ export class UnixChannelPublisher {
           void this.sendMembership().then(() => this.sendAttention()).catch(() => this.dropSocket());
           continue;
         }
-        if (!this.pending || message.seq !== this.pending.seq) throw new Error("local adapter returned unexpected acknowledgement");
+        if (!this.pending || ("seq" in message ? message.seq !== this.pending.seq : this.pending.seq !== undefined)) throw new Error("local adapter returned unexpected acknowledgement");
         const pending = this.pending; this.pending = undefined; pending.onAck?.(); pending.resolve();
       } catch (error) {
         this.rememberError(error);

@@ -54,7 +54,7 @@ export function zellijLocationFromEnvironment(): ZellijLocation | null {
   const sessionName = process.env.ZELLIJ_SESSION_NAME;
   const paneId = process.env.ZELLIJ_PANE_ID;
   if (!sessionName || !/^\d+$/.test(paneId ?? "")) return null;
-  const location = { sessionName, paneId: Number(paneId) };
+  const location = { zellijSessionName: sessionName, zellijPaneId: Number(paneId) };
   return validZellijLocation(location) ? location : null;
 }
 
@@ -62,7 +62,7 @@ async function publishAttention(ctx: ExtensionContext, state: PiAttentionState):
   const publisher = await sessionPublisher(ctx);
   if (!publisher) return;
   try {
-    await publisher.attention(state, zellijLocationFromEnvironment());
+    await publisher.attention(state, state === "waiting" ? zellijLocationFromEnvironment() : null);
   } catch {
     // The optional local relay cannot block Pi agent lifecycle events.
   }

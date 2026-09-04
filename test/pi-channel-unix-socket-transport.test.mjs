@@ -24,8 +24,10 @@ async function listener(socketPath, capability, received, membershipResponse) {
         received.push(message);
         if (message.type === "hello") {
           if (message.cap !== capability) return socket.end('{"v":1,"type":"error","code":"unauthorized"}\n');
-        } else if (message.type === "membership" || message.type === "attention") {
+        } else if (message.type === "membership") {
           socket.write(membershipResponse ?? `{"v":1,"type":"ack","seq":${message.seq}}\n`);
+        } else if (message.type === "attention") {
+          socket.write(membershipResponse ?? '{"v":1,"type":"ack"}\n');
         }
       }
     });
@@ -41,8 +43,8 @@ function publisher(socketPath) {
 
 test("UnixChannelPublisher rejects invalid Zellij attention locations", async () => {
   const value = publisher("/tmp/pi-channel-invalid-location.socket");
-  await assert.rejects(value.attention("waiting", { sessionName: "project", paneId: 0 }), /invalid Zellij location/);
-  await assert.rejects(value.attention("waiting", { sessionName: "bad session", paneId: 1 }), /invalid Zellij location/);
+  await assert.rejects(value.attention("waiting", { zellijSessionName: "project", zellijPaneId: 0 }), /invalid Zellij location/);
+  await assert.rejects(value.attention("waiting", { zellijSessionName: "bad session", zellijPaneId: 1 }), /invalid Zellij location/);
 });
 
 test("UnixChannelPublisher authenticates primitive Pi membership snapshots", async t => {
@@ -165,7 +167,7 @@ test("lifecycle hook emits no Oppi association through the authenticated transpo
   assert.deepEqual(received[1].channels, ["ttr"]);
 });
 
-test("attention lifecycle publishes transient state with inherited Zellij location", async t => {
+test("attention lifecycle emits exact relay envelopes and accepts bare attention ACKs", async t => {
   const root = await mkdtemp(join(tmpdir(), "pi-channel-attention-"));
   await chmod(root, 0o700);
   const socketPath = join(root, "attention.socket");
@@ -200,20 +202,11 @@ test("attention lifecycle publishes transient state with inherited Zellij locati
   await new Promise((resolve, reject) => child.once("exit", code => code === 0 ? resolve() : reject(new Error(Buffer.concat(stderr).toString()))));
 
   const attention = received.filter(message => message.type === "attention");
-  assert.deepEqual(attention.map(message => message.state), ["active", "waiting", "cleared"]);
-  assert.deepEqual(attention.map(message => message.zellijLocation), [
-    { sessionName: "project", paneId: 42 },
-    { sessionName: "project", paneId: 42 },
-    { sessionName: "project", paneId: 42 },
+  assert.deepEqual(attention, [
+    { v: 1, type: "attention", state: "active", location: null },
+    { v: 1, type: "attention", state: "waiting", location: { zellijSessionName: "project", zellijPaneId: 42 } },
+    { v: 1, type: "attention", state: "cleared", location: null },
   ]);
-  for (const [index, message] of attention.entries()) {
-    assert.deepEqual(Object.keys(message).sort(), ["epoch", "piSessionFile", "piSessionId", "seq", "state", "type", "v", "zellijLocation"]);
-    assert.equal(message.v, 1);
-    assert.equal(message.piSessionId, "attention-session-123");
-    assert.equal(message.piSessionFile, null);
-    assert.equal(message.seq, index + 2);
-    assert.equal(message.epoch, attention[0].epoch);
-  }
   assert.equal(received.some(message => message.type === "membership" && Object.hasOwn(message, "state")), false);
 });
 
@@ -231,7 +224,7 @@ test("attention publishes null Zellij location without complete valid inherited 
   t.after(() => value.close());
   await value.attention("active", null);
   assert.equal(received.at(-1).type, "attention");
-  assert.equal(received.at(-1).zellijLocation, null);
+  assert.equal(received.at(-1).location, null);
 });
 
 test("the production /channel entrypoint publishes a membership snapshot through the real socket", async t => {

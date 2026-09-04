@@ -18,7 +18,7 @@ test("Zellij attention location requires relay-compatible session and positive p
   try {
     process.env.ZELLIJ_SESSION_NAME = "project";
     process.env.ZELLIJ_PANE_ID = "42";
-    assert.deepEqual(zellijLocationFromEnvironment(), { sessionName: "project", paneId: 42 });
+    assert.deepEqual(zellijLocationFromEnvironment(), { zellijSessionName: "project", zellijPaneId: 42 });
     process.env.ZELLIJ_PANE_ID = "0";
     assert.equal(zellijLocationFromEnvironment(), null);
     process.env.ZELLIJ_PANE_ID = "not-a-pane";
