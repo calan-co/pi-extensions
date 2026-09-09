@@ -9,7 +9,7 @@ import { UnixChannelPublisher } from "../extensions/pi-channel/unix-socket-trans
 import { attachPiMembershipPublisher } from "../extensions/pi-channel/mirror-adapter.ts";
 import { publishPiMembership } from "../extensions/pi-channel/membership-source.ts";
 
-async function listener(socketPath, capability, received, membershipResponse) {
+async function listener(socketPath, capability, received, response) {
   const clients = new Set();
   const server = createServer(socket => {
     clients.add(socket);
@@ -24,10 +24,9 @@ async function listener(socketPath, capability, received, membershipResponse) {
         received.push(message);
         if (message.type === "hello") {
           if (message.cap !== capability) return socket.end('{"v":1,"type":"error","code":"unauthorized"}\n');
-        } else if (message.type === "membership") {
-          socket.write(membershipResponse ?? `{"v":1,"type":"ack","seq":${message.seq}}\n`);
-        } else if (message.type === "attention") {
-          socket.write(membershipResponse ?? '{"v":1,"type":"ack"}\n');
+        } else if (message.type === "membership" || message.type === "attention") {
+          const reply = typeof response === "function" ? response(message) : response;
+          socket.write(reply ?? (message.type === "membership" ? `{"v":1,"type":"ack","seq":${message.seq}}\n` : '{"v":1,"type":"ack"}\n'));
         }
       }
     });
@@ -106,7 +105,10 @@ test("UnixChannelPublisher accepts every fixed versioned relay rejection code an
       "invalid-attention",
     ].map(code => [`{"v":1,"type":"error","code":"${code}"}\n`, new RegExp(`local adapter rejected message: ${code}`)]),
     ['{"type":"error","code":"invalid-frame"}\n', /local adapter returned invalid message/],
+    ['{"v":1,"type":"error"}\n', /local adapter returned invalid message/],
     ['{"v":1,"type":"error","code":"unknown"}\n', /local adapter returned invalid message/],
+    ['{"v":1,"type":"ack"}\n', /local adapter returned unexpected acknowledgement/],
+    ['{"v":1,"type":"ack","seq":"1"}\n', /local adapter returned invalid message/],
     ['not-json\n', /local adapter returned invalid JSON/],
   ];
 
@@ -231,6 +233,69 @@ test("attention lifecycle emits exact relay envelopes and skips waiting without 
     { v: 1, type: "attention", state: "active", location: null },
     { v: 1, type: "attention", state: "cleared", location: null },
   ]);
+});
+
+test("UnixChannelPublisher accepts bare attention ACKs and rejects invalid attention envelopes", async t => {
+  const cases = [
+    ['{"v":1,"type":"ack"}\n', null],
+    ['{"v":1,"type":"ack","seq":1}\n', /local adapter returned unexpected acknowledgement/],
+    ['{"v":1,"type":"error"}\n', /local adapter returned invalid message/],
+    ['{"v":1,"type":"error","code":"invalid-attention"}\n', /local adapter rejected message: invalid-attention/],
+  ];
+  for (const [attentionResponse, expected] of cases) {
+    const root = await mkdtemp(join(tmpdir(), "pi-channel-attention-"));
+    await chmod(root, 0o700);
+    const socketPath = join(root, "socket");
+    const capability = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    await writeFile(join(root, "capability"), `${capability}\n`, { mode: 0o600 });
+    const received = [];
+    const server = await listener(socketPath, capability, received, message => message.type === "membership"
+      ? `{"v":1,"type":"ack","seq":${message.seq}}\n`
+      : attentionResponse);
+    const value = publisher(socketPath);
+    if (expected) await assert.rejects(value.attention("waiting", { zellijSessionName: "project", zellijPaneId: 42 }), expected);
+    else await value.attention("waiting", { zellijSessionName: "project", zellijPaneId: 42 });
+    assert.deepEqual(received.map(message => message.type), ["hello", "membership", "attention"]);
+    value.close();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test("UnixChannelPublisher replays the latest duplicate attention transition after reconnect", async t => {
+  const root = await mkdtemp(join(tmpdir(), "pi-channel-attention-"));
+  await chmod(root, 0o700);
+  const socketPath = join(root, "socket");
+  const capability = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  await writeFile(join(root, "capability"), `${capability}\n`, { mode: 0o600 });
+  const firstMessages = [];
+  const first = await listener(socketPath, capability, firstMessages);
+  const value = publisher(socketPath);
+  t.after(() => value.close());
+  const location = { zellijSessionName: "project", zellijPaneId: 42 };
+  await value.attention("waiting", location);
+  await value.attention("waiting", location);
+  assert.deepEqual(firstMessages.filter(message => message.type === "attention"), [
+    { v: 1, type: "attention", state: "waiting", location },
+    { v: 1, type: "attention", state: "waiting", location },
+  ]);
+
+  for (const socket of first.clients) socket.destroy();
+  await new Promise(resolve => first.close(resolve));
+  const resumed = [];
+  const second = await listener(socketPath, capability, resumed);
+  t.after(() => second.close());
+  await new Promise((resolve, reject) => {
+    const deadline = setTimeout(() => reject(new Error("publisher did not replay attention after reconnect")), 2_000);
+    const poll = () => {
+      if (resumed.some(message => message.type === "attention")) {
+        clearTimeout(deadline);
+        resolve();
+      } else setTimeout(poll, 10);
+    };
+    poll();
+  });
+  assert.deepEqual(resumed.map(message => message.type), ["hello", "membership", "attention"]);
+  assert.deepEqual(resumed.at(-1), { v: 1, type: "attention", state: "waiting", location });
 });
 
 test("attention publishes null Zellij location for active lifecycle frames", async t => {

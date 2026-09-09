@@ -3,8 +3,36 @@ import assert from "node:assert/strict";
 import { readFile, mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import piChannel from "../extensions/pi-channel/index.ts";
+import piChannel, { zellijLocationFromEnvironment } from "../extensions/pi-channel/index.ts";
 import { subscribePiMembership } from "../extensions/pi-channel/membership-source.ts";
+
+test("Zellij environment locations accept bounded coordinates and reject missing or invalid values", () => {
+  const original = Object.fromEntries(["ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"].map(name => [name, process.env[name]]));
+  const set = (sessionName, paneId) => {
+    if (sessionName === undefined) delete process.env.ZELLIJ_SESSION_NAME;
+    else process.env.ZELLIJ_SESSION_NAME = sessionName;
+    if (paneId === undefined) delete process.env.ZELLIJ_PANE_ID;
+    else process.env.ZELLIJ_PANE_ID = paneId;
+  };
+  try {
+    set("oppi-zellij", "42");
+    assert.deepEqual(zellijLocationFromEnvironment(), { zellijSessionName: "oppi-zellij", zellijPaneId: 42 });
+    set(undefined, "42");
+    assert.equal(zellijLocationFromEnvironment(), null);
+    set("oppi-zellij", undefined);
+    assert.equal(zellijLocationFromEnvironment(), null);
+    set("bad session", "42");
+    assert.equal(zellijLocationFromEnvironment(), null);
+    set("oppi-zellij", "0");
+    assert.equal(zellijLocationFromEnvironment(), null);
+    set("oppi-zellij", "4294967296");
+    assert.equal(zellijLocationFromEnvironment(), null);
+    set("oppi-zellij", "4.2");
+    assert.equal(zellijLocationFromEnvironment(), null);
+  } finally {
+    set(original.ZELLIJ_SESSION_NAME, original.ZELLIJ_PANE_ID);
+  }
+});
 
 test("channel mutations publish branch-derived primitive membership snapshots", async t => {
   const commands = new Map();
