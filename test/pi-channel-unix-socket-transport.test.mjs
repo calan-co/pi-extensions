@@ -235,6 +235,37 @@ test("attention lifecycle emits exact relay envelopes and skips waiting without 
   ]);
 });
 
+test("lifecycle publish errors from the real relay socket are swallowed", async t => {
+  const root = await mkdtemp(join(tmpdir(), "pi-channel-attention-"));
+  await chmod(root, 0o700);
+  const socketPath = join(root, "attention.socket");
+  const capability = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  await writeFile(join(root, "capability"), `${capability}\n`, { mode: 0o600 });
+  const received = [];
+  const server = await listener(socketPath, capability, received, message => message.type === "membership"
+    ? `{"v":1,"type":"ack","seq":${message.seq}}\n`
+    : '{"v":1,"type":"error","code":"invalid-attention"}\n');
+  t.after(() => server.close());
+  const script = `
+    import piChannel from './extensions/pi-channel/index.ts';
+    const events = new Map();
+    piChannel({ appendEntry() {}, registerCommand() {}, on(name, handler) { events.set(name, handler); } });
+    const ctx = { sessionManager: { getSessionId: () => 'attention-errors-123', getBranch: () => [] } };
+    await events.get('agent_start')({}, ctx);
+    await events.get('agent_settled')({}, ctx);
+    await events.get('session_shutdown')({}, ctx);
+    process.exit(0);
+  `;
+  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], {
+    cwd: new URL("..", import.meta.url),
+    env: { ...process.env, PI_CHANNEL_SOCKET_PATH: socketPath, ZELLIJ_SESSION_NAME: "project", ZELLIJ_PANE_ID: "42" },
+  });
+  const stderr = [];
+  child.stderr.on("data", value => stderr.push(value));
+  await new Promise((resolve, reject) => child.once("exit", code => code === 0 ? resolve() : reject(new Error(Buffer.concat(stderr).toString()))));
+  assert.deepEqual(received.filter(message => message.type === "attention").map(message => message.state), ["active", "waiting", "cleared"]);
+});
+
 test("UnixChannelPublisher accepts bare attention ACKs and rejects invalid attention envelopes", async t => {
   const cases = [
     ['{"v":1,"type":"ack"}\n', null],
@@ -261,7 +292,7 @@ test("UnixChannelPublisher accepts bare attention ACKs and rejects invalid atten
   }
 });
 
-test("UnixChannelPublisher replays the latest duplicate attention transition after reconnect", async t => {
+test("UnixChannelPublisher replays only the final attention transition after reconnect", async t => {
   const root = await mkdtemp(join(tmpdir(), "pi-channel-attention-"));
   await chmod(root, 0o700);
   const socketPath = join(root, "socket");
@@ -271,12 +302,12 @@ test("UnixChannelPublisher replays the latest duplicate attention transition aft
   const first = await listener(socketPath, capability, firstMessages);
   const value = publisher(socketPath);
   t.after(() => value.close());
-  const location = { zellijSessionName: "project", zellijPaneId: 42 };
-  await value.attention("waiting", location);
-  await value.attention("waiting", location);
+  const finalLocation = { zellijSessionName: "project-final", zellijPaneId: 99 };
+  await value.attention("active", null);
+  await value.attention("waiting", finalLocation);
   assert.deepEqual(firstMessages.filter(message => message.type === "attention"), [
-    { v: 1, type: "attention", state: "waiting", location },
-    { v: 1, type: "attention", state: "waiting", location },
+    { v: 1, type: "attention", state: "active", location: null },
+    { v: 1, type: "attention", state: "waiting", location: finalLocation },
   ]);
 
   for (const socket of first.clients) socket.destroy();
@@ -295,7 +326,42 @@ test("UnixChannelPublisher replays the latest duplicate attention transition aft
     poll();
   });
   assert.deepEqual(resumed.map(message => message.type), ["hello", "membership", "attention"]);
-  assert.deepEqual(resumed.at(-1), { v: 1, type: "attention", state: "waiting", location });
+  assert.deepEqual(resumed.filter(message => message.type === "attention"), [
+    { v: 1, type: "attention", state: "waiting", location: finalLocation },
+  ]);
+});
+
+test("relay snapshot requests resend membership then the latest cached attention", async t => {
+  const root = await mkdtemp(join(tmpdir(), "pi-channel-attention-"));
+  await chmod(root, 0o700);
+  const socketPath = join(root, "socket");
+  const capability = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  await writeFile(join(root, "capability"), `${capability}\n`, { mode: 0o600 });
+  const received = [];
+  const server = await listener(socketPath, capability, received);
+  t.after(() => server.close());
+  const value = publisher(socketPath);
+  t.after(() => value.close());
+  const location = { zellijSessionName: "snapshot-project", zellijPaneId: 7 };
+  await value.snapshot(["ttr"]);
+  await value.attention("active", null);
+  await value.attention("waiting", location);
+
+  for (const socket of server.clients) socket.write('{"v":1,"type":"snapshot.request"}\n');
+  await new Promise((resolve, reject) => {
+    const deadline = setTimeout(() => reject(new Error("publisher did not answer snapshot request")), 2_000);
+    const poll = () => {
+      if (received.length >= 6) {
+        clearTimeout(deadline);
+        resolve();
+      } else setTimeout(poll, 10);
+    };
+    poll();
+  });
+  assert.deepEqual(received.slice(-2), [
+    { ...received[1], seq: 2 },
+    { v: 1, type: "attention", state: "waiting", location },
+  ]);
 });
 
 test("attention publishes null Zellij location for active lifecycle frames", async t => {
