@@ -18,7 +18,7 @@ A v1 record is converted under the existing atomic transaction lock and persiste
 
 ## Authorization and safety
 
-- Manager sessions come only from `ctx.sessionManager.getSessionId()`.
+- Manager sessions come only from `ctx.sessionManager.getSessionId()`; displayed Manager names are resolved from Pi session names and are never persisted in TTR.
 - The active Manager registered for `coordinatorDomain` authorizes all work-item transitions and evidence writes. Replacing or deactivating that Manager changes authority dynamically without changing report provenance.
 - Explicit active TTR admins (bootstrapped through `TTR_ADMIN_SESSION_IDS`) alone can transfer a coordinator. Transfer validates the target domain has an active Manager, changes only `coordinatorDomain`, and appends audit.
 - A contributor may be added or removed only by the coordinator. Any non-lead work-item reference may be removed by that coordinator with an audited decision; the lead cannot be removed, but an active admin may explicitly move it to the coordinator domain.

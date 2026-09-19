@@ -18,12 +18,24 @@ test("v1 migration is idempotent, preserves provenance gaps, and adds one legacy
   assert.equal(migrated.audit.filter(event => event.action === "legacy-import").length, 1);
   assert.equal(migrated.audit[0].changed.legacyOwnerPocSessionId, "retired-manager");
   assert.equal("ownerPocSessionId" in migrated, false);
-  await plane.setSessionNaming("s", true); // transaction persists v2 conversion
+  await plane.migrate(); // transaction persists v2 conversion
   const stored = JSON.parse(await readFile(statePath, "utf8"));
   assert.equal(stored.version, 2);
   assert.equal(stored.defects["ttr-old"].audit.filter(event => event.action === "legacy-import").length, 1);
   assert.equal(stored.defects["ttr-old"].audit[0].changed.legacyOwnerPocSessionId, "retired-manager");
   assert.equal("ownerPocSessionId" in stored.defects["ttr-old"], false);
+});
+
+test("manager registrations retain no copied or generated name", async () => {
+  const { statePath } = await setup();
+  await writeFile(statePath, JSON.stringify({ version: 2, pocRegistryVersion: 2, registrations: { payments: { domain: "payments", sessionId: "payments-manager", managerName: "Avery", registeredAt: "2026-01-01T00:00:00.000Z", active: true } }, aliases: { payments: "payments" }, defects: {}, admins: {}, namingOptIns: { "payments-manager": true } }));
+  const plane = new TriageControlPlane({ statePath });
+  await plane.migrate();
+  const stored = JSON.parse(await readFile(statePath, "utf8"));
+  assert.equal("managerName" in stored.registrations.payments, false);
+  assert.equal("namingOptIns" in stored, false);
+  const record = await plane.registerPoc("risk", { sessionId: "risk-manager" }, false);
+  assert.equal("managerName" in record, false);
 });
 
 test("coordinator is dynamically resolved and transfer preserves immutable report and work references", async () => {
