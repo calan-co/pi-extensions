@@ -166,9 +166,9 @@ async function runTtrUi(plane: TriageControlPlane, ctx: ExtensionContext): Promi
   let targetPocSessionId: string | undefined;
   let targetLabel = "";
   if (operation === "Rebind work item") {
-    const target = await promptText(ctx, "Target Manager domain or session ID:", "payments or <Pi session ID>");
+    const target = await promptText(ctx, "Target Manager domain or session ID:", "Jamie, payments, or <Pi session ID>");
     if (!target) return;
-    const manager = await plane.resolvePoc(target) ?? (await plane.adminLookup(actorSessionId)).pocs.find(record => record.active && record.sessionId === target);
+    const manager = await plane.resolvePoc(target) ?? (await plane.listPocs()).find(record => record.sessionId === target || record.managerName?.toLowerCase() === target.toLowerCase());
     if (!manager) {
       ctx.ui.notify(`No active target Manager: ${target}`, "warning");
       return;

@@ -124,9 +124,9 @@ test("/ttr ui retrieves a defect by ID", async () => {
 
 test("/ttr UI asks for a rebind target before the final confirmation", async () => {
   const triageControlPlane = await loadExtension("session-123");
-  const { api, commands, context } = setupApi();
+  const { api, commands, notifications, context } = setupApi();
   const choices = ["Admin reconciliation", "Rebind work item"];
-  const answers = ["ttr-123", "payments", "reason", "ticket:123", "BUG-2", "backlog/BUG-2.md", "proposed", "proposed,closed"];
+  const answers = ["ttr-123", "", "reason", "ticket:123", "BUG-2", "backlog/BUG-2.md", "proposed", "proposed,closed"];
   const labels = [];
   context.ui.select = async () => choices.shift();
   context.ui.input = async (label) => { labels.push(label); return answers.shift(); };
@@ -134,9 +134,12 @@ test("/ttr UI asks for a rebind target before the final confirmation", async () 
   triageControlPlane(api);
   await commands.get("ttr").handler("register payments", context);
   await commands.get("ttr").handler("register --admin", context);
+  await commands.get("ttr").handler("list --json", context);
+  answers[1] = JSON.parse(notifications.at(-1).message)[0].managerName;
 
   await commands.get("ttr").handler("ui", context);
   assert.equal(labels[1], "Target Manager domain or session ID:");
+  assert.equal(labels[2], "Reason:");
 });
 
 test("/ttr UI reconciles an admin-selected defect through the authorized core path", async () => {
