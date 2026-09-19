@@ -20,8 +20,6 @@ const TTR_SUBCOMMANDS = [
   { value: "list", label: "list", description: "Render Managers, aliases, and statuses" },
   { value: "unregister", label: "unregister", description: "Remove a domain or an entire Manager" },
   { value: "deactivate", label: "deactivate", description: "Deactivate a domain's Manager" },
-  { value: "admins", label: "admins", description: "List explicitly enrolled TTR admins" },
-  { value: "admin-deactivate", label: "admin-deactivate", description: "Revoke an enrolled TTR admin" },
   { value: "autoname", label: "autoname", description: "Opt in to guarded TTR session naming" },
 ] as const;
 
@@ -29,10 +27,13 @@ function json(value: unknown): { content: Array<{ type: "text"; text: string }>;
   return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
 }
 
-function pocTable(pocs: PocListEntry[]): string {
-  const rows = [["MANAGER", "DOMAIN", "ALIASES", "SESSION", "STATUS"], ...pocs.map(poc => [poc.managerName ?? "-", poc.domain, poc.aliases.filter(alias => alias !== poc.domain).join(", ") || "-", poc.sessionId, poc.active ? "active" : "inactive"])];
+function table(rows: string[][]): string {
   const widths = rows[0]!.map((_, column) => Math.max(...rows.map(row => row[column]!.length)));
   return rows.map(row => row.map((cell, column) => cell.padEnd(widths[column]!)).join("  ")).join("\n");
+}
+
+function pocTable(pocs: PocListEntry[]): string {
+  return table([["MANAGER", "DOMAIN", "ALIASES", "SESSION", "STATUS"], ...pocs.map(poc => [poc.managerName ?? "-", poc.domain, poc.aliases.filter(alias => alias !== poc.domain).join(", ") || "-", poc.sessionId, poc.active ? "active" : "inactive"])]);
 }
 
 function currentSessionId(ctx: ExtensionContext): string {
@@ -41,15 +42,20 @@ function currentSessionId(ctx: ExtensionContext): string {
   return sessionId;
 }
 
-function parseRegisterArgs(args: string, defaultDomain: string): { domains: string[]; sessionId?: string; replace: boolean } {
+function parseRegisterArgs(args: string, defaultDomain: string): { domains: string[]; sessionId?: string; replace: boolean; admin: boolean } {
   const tokens = args.trim().split(/\s+/).filter(Boolean);
   const domains: string[] = [];
   let sessionId: string | undefined;
   let replace = false;
+  let admin = false;
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index]!;
     if (token === "--replace") {
       replace = true;
+      continue;
+    }
+    if (token === "--admin") {
+      admin = true;
       continue;
     }
     if (token === "--session-id") {
@@ -60,7 +66,8 @@ function parseRegisterArgs(args: string, defaultDomain: string): { domains: stri
     }
     domains.push(token);
   }
-  return { domains: domains.length > 0 ? domains : [defaultDomain], sessionId, replace };
+  if (admin && (domains.length > 0 || replace)) throw new Error("Usage: /ttr register --admin [--session-id <id>]");
+  return { domains: admin ? [] : (domains.length > 0 ? domains : [defaultDomain]), sessionId, replace, admin };
 }
 
 async function domainFromContext(pi: ExtensionAPI, cwd: string): Promise<string> {
@@ -86,18 +93,30 @@ function parseDomain(args: string, defaultDomain: string, usage: string): string
   return values[0] ?? defaultDomain;
 }
 
-function parseUnregisterArgs(args: string, defaultDomain: string): { domain: string; all: boolean } {
+function parseUnregisterArgs(args: string, defaultDomain: string): { domain: string; all: boolean; admin: boolean } {
   const values = args.trim().split(/\s+/).filter(Boolean);
   const all = values.includes("--all");
-  const domains = values.filter(value => value !== "--all");
-  if (domains.length > 1) throw new Error("Usage: /ttr unregister [domain] [--all]");
-  return { domain: domains[0] ?? defaultDomain, all };
+  const admin = values.includes("--admin");
+  const domains = values.filter(value => value !== "--all" && value !== "--admin");
+  if (domains.length > 1 || (admin && (all || domains.length !== 1))) throw new Error("Usage: /ttr unregister [domain] [--all] | /ttr unregister <session-id> --admin");
+  return { domain: domains[0] ?? defaultDomain, all, admin };
 }
 
-function parseListArgs(args: string): { activeOnly: boolean } {
-  if (!args.trim()) return { activeOnly: false };
-  if (args.trim() === "--active") return { activeOnly: true };
-  throw new Error("Usage: /ttr list [--active]");
+function parseStatusArgs(args: string, defaultDomain: string): { domain: string; json: boolean } {
+  const values = args.trim().split(/\s+/).filter(Boolean);
+  const json = values.includes("--json");
+  const domains = values.filter(value => value !== "--json");
+  if (domains.length > 1) throw new Error("Usage: /ttr status [domain] [--json]");
+  return { domain: domains[0] ?? defaultDomain, json };
+}
+
+function parseListArgs(args: string): { activeOnly: boolean; json: boolean; admin: boolean } {
+  const values = args.trim().split(/\s+/).filter(Boolean);
+  const activeOnly = values.includes("--active");
+  const json = values.includes("--json");
+  const admin = values.includes("--admin");
+  if (values.some(value => !["--active", "--json", "--admin"].includes(value)) || (admin && activeOnly)) throw new Error("Usage: /ttr list [--active] [--json] [--admin]");
+  return { activeOnly, json, admin };
 }
 
 function ttrArgumentCompletions(prefix: string) {
@@ -119,14 +138,25 @@ function ttrArgumentCompletions(prefix: string) {
   }
   if (tokens[0] === "list") {
     const current = hasTrailingSpace ? "" : tokens.at(-1)!;
-    const items = [{ value: "--active", label: "--active", description: "Show active Managers only" }]
+    const items = [
+      { value: "--active", label: "--active", description: "Show active Managers only" },
+      { value: "--json", label: "--json", description: "Output JSON for an agent" },
+      { value: "--admin", label: "--admin", description: "List enrolled admins" },
+    ].filter(item => !tokens.includes(item.value) && item.value.startsWith(current));
+    return items.length > 0 ? items : null;
+  }
+  if (tokens[0] === "status") {
+    const current = hasTrailingSpace ? "" : tokens.at(-1)!;
+    const items = [{ value: "--json", label: "--json", description: "Output JSON for an agent" }]
       .filter(item => !tokens.includes(item.value) && item.value.startsWith(current));
     return items.length > 0 ? items : null;
   }
   if (tokens[0] === "unregister") {
     const current = hasTrailingSpace ? "" : tokens.at(-1)!;
-    const items = [{ value: "--all", label: "--all", description: "Remove every domain for this Manager" }]
-      .filter(item => !tokens.includes(item.value) && item.value.startsWith(current));
+    const items = [
+      { value: "--all", label: "--all", description: "Remove every domain for this Manager" },
+      { value: "--admin", label: "--admin", description: "Revoke an enrolled admin" },
+    ].filter(item => !tokens.includes(item.value) && item.value.startsWith(current));
     return items.length > 0 ? items : null;
   }
   if (tokens[0] !== "register") return null;
@@ -134,6 +164,7 @@ function ttrArgumentCompletions(prefix: string) {
   const items = [
     { value: "--replace", label: "--replace", description: "Replace an active Manager explicitly" },
     { value: "--session-id", label: "--session-id", description: "Register an explicit Pi session ID" },
+    { value: "--admin", label: "--admin", description: "Enroll an admin instead of a Manager" },
   ].filter(item => !tokens.includes(item.value) && item.value.startsWith(current));
   return items.length > 0 ? items : null;
 }
@@ -169,7 +200,7 @@ export default function triageControlPlane(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("ttr", {
-    description: "TTR control plane: register, status, list, unregister, explicit admin lookup/revocation, deactivate, or autoname. Domains default to the current repository name.",
+    description: "TTR control plane: register, status, list, unregister, deactivate, or autoname. Domains default to the current repository name.",
     getArgumentCompletions: ttrArgumentCompletions,
     handler: async (args, ctx) => {
       const [subcommand = "", ...rest] = (args || "").trim().split(/\s+/).filter(Boolean);
@@ -178,6 +209,11 @@ export default function triageControlPlane(pi: ExtensionAPI) {
       if (subcommand === "register") {
         const input = parseRegisterArgs(subcommandArgs, await domainFromContext(pi, ctx.cwd));
         const activeSessionId = currentSessionId(ctx);
+        if (input.admin) {
+          const admin = await plane.registerAdmin(input.sessionId ?? activeSessionId, activeSessionId);
+          ctx.ui.notify(`TTR admin registered: ${admin.sessionId}`, "info");
+          return;
+        }
         const records = await plane.registerPocs(input.domains, { sessionId: input.sessionId ?? activeSessionId, projectBoundary: ctx.cwd }, input.replace);
         // TTR registration is a channel publisher only for the active trace it can append to.
         if (records.some(record => record.sessionId === activeSessionId)) {
@@ -185,18 +221,6 @@ export default function triageControlPlane(pi: ExtensionAPI) {
         }
         await syncSessionName(ctx);
         ctx.ui.notify(`TTR Manager registered: ${records.map(record => record.domain).join(", ")} → ${records[0]!.sessionId}`, "info");
-        return;
-      }
-      if (subcommand === "admins") {
-        if (subcommandArgs) throw new Error("Usage: /ttr admins");
-        ctx.ui.notify(JSON.stringify(await plane.listAdmins(currentSessionId(ctx)), null, 2), "info");
-        return;
-      }
-      if (subcommand === "admin-deactivate") {
-        const sessionId = subcommandArgs.trim();
-        if (!sessionId || /\s/.test(sessionId)) throw new Error("Usage: /ttr admin-deactivate <session-id>");
-        const record = await plane.deactivateAdmin(sessionId, currentSessionId(ctx));
-        ctx.ui.notify(`TTR admin deactivated: ${record.sessionId}`, "info");
         return;
       }
       if (subcommand === "autoname") {
@@ -209,8 +233,9 @@ export default function triageControlPlane(pi: ExtensionAPI) {
         return;
       }
       if (subcommand === "status" || subcommand === "manager" || subcommand === "poc") {
-        const domain = parseDomain(subcommandArgs, await domainFromContext(pi, ctx.cwd), "/ttr status [domain]");
-        ctx.ui.notify(JSON.stringify(await plane.resolvePoc(domain), null, 2), "info");
+        const input = parseStatusArgs(subcommandArgs, await domainFromContext(pi, ctx.cwd));
+        const manager = await plane.resolvePoc(input.domain);
+        ctx.ui.notify(input.json ? JSON.stringify(manager, null, 2) : pocTable(manager ? [{ ...manager, aliases: [] }] : []), "info");
         await syncSessionName(ctx);
         return;
       }
@@ -221,13 +246,24 @@ export default function triageControlPlane(pi: ExtensionAPI) {
         return;
       }
       if (subcommand === "list") {
-        const { activeOnly } = parseListArgs(subcommandArgs);
-        ctx.ui.notify(pocTable(await plane.listPocs(!activeOnly)), "info");
+        const { activeOnly, json: jsonOutput, admin } = parseListArgs(subcommandArgs);
+        if (admin) {
+          const records = await plane.listAdmins(currentSessionId(ctx));
+          ctx.ui.notify(jsonOutput ? JSON.stringify(records, null, 2) : table([["ADMIN", "SESSION", "STATUS"], ...records.map(record => ["admin", record.sessionId, record.active ? "active" : "inactive"])]), "info");
+        } else {
+          const records = await plane.listPocs(!activeOnly);
+          ctx.ui.notify(jsonOutput ? JSON.stringify(records, null, 2) : pocTable(records), "info");
+        }
         await syncSessionName(ctx);
         return;
       }
       if (subcommand === "unregister") {
         const input = parseUnregisterArgs(subcommandArgs, await domainFromContext(pi, ctx.cwd));
+        if (input.admin) {
+          const admin = await plane.deactivateAdmin(input.domain, currentSessionId(ctx));
+          ctx.ui.notify(`TTR admin unregistered: ${admin.sessionId}`, "info");
+          return;
+        }
         const result = await plane.unregisterPoc(input.domain, input.all, currentSessionId(ctx));
         ctx.ui.notify(`TTR Manager ${input.all ? "unregistered" : "domain unregistered"}: ${result.removedDomains.join(", ")}`, "info");
         await syncSessionName(ctx);
@@ -240,7 +276,7 @@ export default function triageControlPlane(pi: ExtensionAPI) {
         await syncSessionName(ctx);
         return;
       }
-      throw new Error("Usage: /ttr <register|status|list|unregister|deactivate|admins|admin-deactivate|autoname> [domain]");
+      throw new Error("Usage: /ttr <register|status|list|unregister|deactivate|autoname> [domain]");
     },
   });
 

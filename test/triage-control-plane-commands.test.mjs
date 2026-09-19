@@ -57,7 +57,7 @@ const { api, appendedEntries, commands, tools, notifications, sessionNames, cont
   assert.ok(tools.has("ttr_admin_rebind_work_item"));
   assert.ok(tools.has("ttr_supersede_work_item"));
   await commands.get("ttr").handler("register pi-extensions ttr agent-workflows handoff", context);
-  await commands.get("ttr").handler("manager handoff", context);
+  await commands.get("ttr").handler("status handoff --json", context);
 
   assert.deepEqual(appendedEntries, [
     { customType: "pi-channel", data: { version: 1, op: "join", channel: "ttr", source: "ttr" } },
@@ -81,6 +81,8 @@ test("/ttr list renders aliases once with the shared POC status", async () => {
   assert.match(notifications.at(-1).message, /payments\s+billing, checkout\s+session-123\s+inactive/);
   await commands.get("ttr").handler("list --active", context);
   assert.doesNotMatch(notifications.at(-1).message, /payments/);
+  await commands.get("ttr").handler("list --json", context);
+  assert.equal(JSON.parse(notifications.at(-1).message).length, 1);
 });
 
 test("/ttr unregister removes a domain or an entire Manager", async () => {
@@ -124,17 +126,18 @@ test("ttr_intake_for_owner resolves the registered POC without a target session 
   assert.equal(result.details.defect.intake.targetPocSessionId, "session-123");
 });
 
-test("/ttr admin deactivation command executes only for an enrolled active admin", async () => {
+test("/ttr --admin flags enroll, list, and revoke only with active admin authority", async () => {
   const triageControlPlane = await loadExtension("session-123");
   const { api, commands, tools, notifications, context } = setupApi();
   triageControlPlane(api);
 
-  await tools.get("ttr_register_admin").execute("tool", { sessionId: "session-123" }, undefined, undefined, context);
-  await tools.get("ttr_register_admin").execute("tool", { sessionId: "admin-2" }, undefined, undefined, context);
-  await assert.rejects(() => commands.get("ttr").handler("admin-deactivate admin-2", setupApi("untrusted").context), /explicitly enrolled active TTR admin/i);
-  await commands.get("ttr").handler("admin-deactivate admin-2", context);
-  assert.equal(notifications.at(-1).message, "TTR admin deactivated: admin-2");
-  await assert.rejects(() => tools.get("ttr_deactivate_admin").execute("tool", { sessionId: "session-123" }, undefined, undefined, setupApi("admin-2").context), /explicitly enrolled active TTR admin/i);
+  await commands.get("ttr").handler("register --admin", context);
+  await commands.get("ttr").handler("register --admin --session-id admin-2", context);
+  await commands.get("ttr").handler("list --admin --json", context);
+  assert.equal(JSON.parse(notifications.at(-1).message).length, 2);
+  await assert.rejects(() => commands.get("ttr").handler("unregister admin-2 --admin", setupApi("untrusted").context), /explicitly enrolled active TTR admin/i);
+  await commands.get("ttr").handler("unregister admin-2 --admin", context);
+  assert.equal(notifications.at(-1).message, "TTR admin unregistered: admin-2");
   await assert.rejects(() => tools.get("ttr_register_admin").execute("tool", { sessionId: "admin-2" }, undefined, undefined, context), /deactivated and cannot be reactivated/i);
 });
 
@@ -162,18 +165,20 @@ test("/ttr consolidates POC commands and derives an omitted domain from the repo
 
   assert.deepEqual([...commands.keys()], ["ttr"]);
   const complete = commands.get("ttr").getArgumentCompletions;
-  assert.deepEqual(complete("").map(({ value }) => value), ["register", "status", "list", "unregister", "deactivate", "admins", "admin-deactivate", "autoname"]);
+  assert.deepEqual(complete("").map(({ value }) => value), ["register", "status", "list", "unregister", "deactivate", "autoname"]);
   assert.deepEqual(complete("st").map(({ value }) => value), ["status"]);
-  assert.deepEqual(complete("register ").map(({ value }) => value), ["--replace", "--session-id"]);
-  assert.deepEqual(complete("list ").map(({ value }) => value), ["--active"]);
+  assert.deepEqual(complete("register ").map(({ value }) => value), ["--replace", "--session-id", "--admin"]);
+  assert.deepEqual(complete("list ").map(({ value }) => value), ["--active", "--json", "--admin"]);
 
   await commands.get("ttr").handler("register payments", context);
   await commands.get("ttr").handler("status", context);
+  await commands.get("ttr").handler("status --json", context);
   await commands.get("ttr").handler("list --active", context);
   await commands.get("ttr").handler("deactivate", context);
 
   assert.equal(notifications[0].message, "TTR Manager registered: payments → session-123");
-  const manager = JSON.parse(notifications[1].message);
+  assert.match(notifications[1].message, /MANAGER\s+DOMAIN/);
+  const manager = JSON.parse(notifications[2].message);
   assert.equal(typeof manager.managerName, "string");
   delete manager.managerName;
   assert.deepEqual(manager, {
@@ -184,6 +189,6 @@ test("/ttr consolidates POC commands and derives an omitted domain from the repo
     registeredAt: manager.registeredAt,
     active: true,
   });
-  assert.match(notifications[2].message, /payments/);
-  assert.equal(notifications[3].message, "TTR Manager deactivated: payments");
+  assert.match(notifications[3].message, /payments/);
+  assert.equal(notifications[4].message, "TTR Manager deactivated: payments");
 });
