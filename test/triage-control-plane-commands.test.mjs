@@ -19,6 +19,17 @@ test("TTR exposes domain-scoped tools and derives current session internally", a
   assert.ok(result.details.defect.audit[0].actorSessionId);
 });
 
+test("/ttr list --admin renders an admin table without implying Manager names are session IDs", async () => {
+  const extension = await loadExtension(); const { api, commands, context, notifications } = setup("admin"); extension(api);
+  await commands.get("ttr").handler("register payments", context);
+  await commands.get("ttr").handler("register --admin", context);
+
+  await commands.get("ttr").handler("list --admin", context);
+  assert.match(notifications.at(-1), /^MANAGER\s+DOMAIN\s+SESSION\s+STATUS/m);
+  assert.match(notifications.at(-1), /admin/);
+  assert.doesNotMatch(notifications.at(-1), /^\s*\[/);
+});
+
 test("transfer is available through UI and only calls the control plane through a current session", async () => {
   const extension = await loadExtension(); const manager = setup(); extension(manager.api);
   await manager.commands.get("ttr").handler("register payments", manager.context);
