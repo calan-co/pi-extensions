@@ -94,6 +94,21 @@ test("/ttr unregister removes a domain or an entire Manager", async () => {
   assert.equal(notifications.at(-1).message, "TTR Manager unregistered: payments");
 });
 
+test("/ttr Manager lifecycle commands reject other sessions and accept the Manager or active admin", async () => {
+  const triageControlPlane = await loadExtension("admin-session");
+  const { api, commands, tools, context } = setupApi("manager-session");
+  triageControlPlane(api);
+  await commands.get("ttr").handler("register payments billing", context);
+
+  await assert.rejects(() => commands.get("ttr").handler("unregister billing", setupApi("other-session").context), /not authorized to unregister Manager registration/i);
+  await assert.rejects(() => commands.get("ttr").handler("deactivate payments", setupApi("other-session").context), /not authorized to deactivate Manager registration/i);
+  await commands.get("ttr").handler("unregister billing", context);
+
+  const adminContext = setupApi("admin-session").context;
+  await tools.get("ttr_register_admin").execute("tool", { sessionId: "admin-session" }, undefined, undefined, adminContext);
+  await commands.get("ttr").handler("deactivate payments", adminContext);
+});
+
 test("ttr_intake_for_owner resolves the registered POC without a target session ID", async () => {
   const triageControlPlane = await loadExtension();
   const { api, commands, tools, context } = setupApi();

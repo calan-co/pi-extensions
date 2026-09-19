@@ -25,7 +25,7 @@ test("POC registration persists, resolves, and needs explicit replacement confir
 
   const reloaded = new TriageControlPlane({ statePath });
   assert.equal((await reloaded.resolvePoc("payments"))?.sessionId, "other");
-  await reloaded.deactivatePoc("payments");
+  await reloaded.deactivatePoc("payments", "other");
   assert.equal(await reloaded.resolvePoc("payments"), undefined);
   assert.match(await readFile(statePath, "utf8"), /payments/);
 });
@@ -57,13 +57,26 @@ test("unregister removes one domain or an entire Manager registration", async ()
   const plane = new TriageControlPlane({ statePath });
   await plane.registerPocs(["payments", "billing"], poc, false);
 
-  assert.deepEqual((await plane.unregisterPoc("payments")).removedDomains, ["payments"]);
+  assert.deepEqual((await plane.unregisterPoc("payments", false, poc.sessionId)).removedDomains, ["payments"]);
   assert.equal(await plane.resolvePoc("payments"), undefined);
   assert.equal((await plane.resolvePoc("billing"))?.domain, "billing");
   assert.deepEqual((await plane.listPocs()).map(({ domain, aliases }) => ({ domain, aliases })), [{ domain: "billing", aliases: ["billing"] }]);
 
-  assert.deepEqual((await plane.unregisterPoc("billing", true)).removedDomains, ["billing"]);
+  assert.deepEqual((await plane.unregisterPoc("billing", true, poc.sessionId)).removedDomains, ["billing"]);
   assert.deepEqual(await plane.listPocs(true), []);
+});
+
+test("only a Manager or active admin may unregister or deactivate its registration", async () => {
+  const { statePath } = await setup();
+  const admin = "admin-session";
+  const plane = new TriageControlPlane({ statePath, bootstrapAdminSessionIds: [admin] });
+  await plane.registerPocs(["payments", "billing"], poc, false);
+
+  await assert.rejects(() => plane.unregisterPoc("billing", false, "other-session"), /not authorized to unregister Manager registration/i);
+  await assert.rejects(() => plane.deactivatePoc("payments", "other-session"), /not authorized to deactivate Manager registration/i);
+  await plane.deactivatePoc("payments", poc.sessionId);
+  await plane.registerAdmin(admin, admin);
+  assert.deepEqual((await plane.unregisterPoc("billing", false, admin)).removedDomains, ["billing"]);
 });
 
 test("legacy per-alias records compact on the next write without breaking routing", async () => {
@@ -78,7 +91,7 @@ test("legacy per-alias records compact on the next write without breaking routin
   const plane = new TriageControlPlane({ statePath });
 
   assert.equal((await plane.resolvePoc("billing"))?.sessionId, poc.sessionId);
-  await plane.deactivatePoc("billing");
+  await plane.deactivatePoc("billing", poc.sessionId);
   const persisted = JSON.parse(await readFile(statePath, "utf8"));
   assert.deepEqual(Object.keys(persisted.registrations), ["payments"]);
   assert.deepEqual(persisted.aliases, { payments: "payments", billing: "payments" });
@@ -248,6 +261,7 @@ test("explicit admins reconcile orphaned Managers, rebind active sessions, and r
   await plane.registerAdmin(adminSessionId, adminSessionId);
   await assert.rejects(() => plane.adminLookup("untrusted"), /explicitly enrolled active TTR admin/i);
   await assert.rejects(() => plane.markPocAssignmentOrphaned(defect.id, { reason: "", evidenceReferences: [] }, adminSessionId), /orphaning reason and evidence references/i);
+  await assert.rejects(() => plane.adminRebindWorkItem(defect.id, { id: "BUG-2", path: "backlog/BUG-2.md", status: "proposed", lifecycleStates: ["proposed", "closed"] }, { targetPocSessionId: poc.sessionId, reason: "recover orphan", evidenceReferences: ["incident:42"] }, adminSessionId), /must be explicitly orphaned before rebinding/i);
   const orphaned = await plane.markPocAssignmentOrphaned(defect.id, { reason: "session deleted", evidenceReferences: ["incident:42"] }, adminSessionId);
   assert.equal(orphaned.pocAssignment.status, "orphaned");
   await assert.rejects(() => plane.reassignWorkItem(defect.id, { id: "BUG-2", path: "backlog/BUG-2.md", status: "proposed", lifecycleStates: ["proposed"] }, { reason: "x", evidenceReferences: ["incident:42"] }, poc.sessionId), /not authorized/i);

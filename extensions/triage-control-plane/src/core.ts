@@ -348,22 +348,25 @@ export class TriageControlPlane {
     return Object.values(state.admins ?? {}).map(clone);
   }
 
-  async deactivatePoc(domain: string): Promise<PocRecord> {
+  async deactivatePoc(domain: string, actorSessionId: string): Promise<PocRecord> {
     const key = normalizedDomain(domain);
     return this.transaction((state) => {
       const record = this.findPoc(state, key);
       if (!record) throw new Error(`No Manager registration for ${key}`);
+      this.requireManagerOrAdminAuthority(state, record, actorSessionId, "deactivate");
       record.active = false;
       return record;
     });
   }
 
   /** Removes one domain alias, or every domain belonging to its Manager. */
-  async unregisterPoc(domain: string, removeAll = false): Promise<{ removedDomains: string[] }> {
+  async unregisterPoc(domain: string, removeAll: boolean, actorSessionId: string): Promise<{ removedDomains: string[] }> {
     const key = normalizedDomain(domain);
     return this.transaction((state) => {
       const canonicalDomain = state.aliases?.[key] ?? key;
-      if (!state.registrations[canonicalDomain]) throw new Error(`No Manager registration for ${key}`);
+      const record = state.registrations[canonicalDomain];
+      if (!record) throw new Error(`No Manager registration for ${key}`);
+      this.requireManagerOrAdminAuthority(state, record, actorSessionId, "unregister");
       const domains = Object.entries(state.aliases ?? {}).filter(([, canonical]) => canonical === canonicalDomain).map(([alias]) => alias).sort();
       const removedDomains = removeAll ? domains : [key];
       if (!removeAll && !domains.includes(key)) throw new Error(`No Manager registration for ${key}`);
@@ -533,6 +536,7 @@ export class TriageControlPlane {
       const previousWorkItem = this.requireWorkItem(defect);
       const replacement = this.validateWorkItem(workItem);
       this.requireAudit(input, "rebinding");
+      if (this.pocAssignment(defect).status !== "orphaned") throw new Error(`Manager assignment for defect ${defectId} must be explicitly orphaned before rebinding`);
       this.requireActiveTargetPoc(state, defect, input.targetPocSessionId);
       if (previousWorkItem.id === replacement.id || previousWorkItem.path === replacement.path) throw new Error("replacement work item is the same as the authoritative work item");
       this.requireNoWorkItemCollision(state, defectId, replacement);
@@ -674,6 +678,12 @@ export class TriageControlPlane {
   private isActiveAdmin(state: State, sessionId: string): boolean { return state.admins?.[sessionId]?.active === true; }
   private requireAdminAuthority(state: State, actorSessionId: string): void {
     if (!actorSessionId?.trim() || !this.isActiveAdmin(state, actorSessionId.trim())) throw new Error("Session is not an explicitly enrolled active TTR admin");
+  }
+  private requireManagerOrAdminAuthority(state: State, manager: PocRecord, actorSessionId: string, action: string): void {
+    const actor = actorSessionId?.trim();
+    if (!actor || (manager.sessionId !== actor && !this.isActiveAdmin(state, actor))) {
+      throw new Error(`Session is not authorized to ${action} Manager registration for ${manager.domain}`);
+    }
   }
   private pocAssignment(defect: Defect): PocAssignment {
     return defect.pocAssignment ?? { sessionId: defect.ownerPocSessionId, status: "active", assignedAt: defect.intake.recordedAt };

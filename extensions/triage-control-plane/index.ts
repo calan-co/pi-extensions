@@ -228,14 +228,14 @@ export default function triageControlPlane(pi: ExtensionAPI) {
       }
       if (subcommand === "unregister") {
         const input = parseUnregisterArgs(subcommandArgs, await domainFromContext(pi, ctx.cwd));
-        const result = await plane.unregisterPoc(input.domain, input.all);
+        const result = await plane.unregisterPoc(input.domain, input.all, currentSessionId(ctx));
         ctx.ui.notify(`TTR Manager ${input.all ? "unregistered" : "domain unregistered"}: ${result.removedDomains.join(", ")}`, "info");
         await syncSessionName(ctx);
         return;
       }
       if (subcommand === "deactivate") {
         const domain = parseDomain(subcommandArgs, await domainFromContext(pi, ctx.cwd), "/ttr deactivate [domain]");
-        const record = await plane.deactivatePoc(domain);
+        const record = await plane.deactivatePoc(domain, currentSessionId(ctx));
         ctx.ui.notify(`TTR Manager deactivated: ${record.domain}`, "info");
         await syncSessionName(ctx);
         return;
