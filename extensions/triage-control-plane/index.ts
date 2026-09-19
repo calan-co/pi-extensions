@@ -12,9 +12,8 @@ const REQUESTER_CATEGORIES = [
 ] as const;
 const TTR_SUBCOMMANDS = [
   { value: "register", label: "register", description: "Register the active Manager for a domain" },
-  { value: "manager", label: "manager", description: "Inspect a domain's active Manager" },
-  { value: "managers", label: "managers", description: "List active Manager registrations" },
-  { value: "list", label: "list", description: "Render all Managers, aliases, and statuses" },
+  { value: "status", label: "status", description: "Inspect a domain's active Manager" },
+  { value: "list", label: "list", description: "Render Managers, aliases, and statuses" },
   { value: "unregister", label: "unregister", description: "Remove a domain or an entire Manager" },
   { value: "deactivate", label: "deactivate", description: "Deactivate a domain's Manager" },
   { value: "autoname", label: "autoname", description: "Opt in to guarded TTR session naming" },
@@ -89,6 +88,12 @@ function parseUnregisterArgs(args: string, defaultDomain: string): { domain: str
   return { domain: domains[0] ?? defaultDomain, all };
 }
 
+function parseListArgs(args: string): { activeOnly: boolean } {
+  if (!args.trim()) return { activeOnly: false };
+  if (args.trim() === "--active") return { activeOnly: true };
+  throw new Error("Usage: /ttr list [--active]");
+}
+
 function ttrArgumentCompletions(prefix: string) {
   const hasTrailingSpace = /\s$/.test(prefix);
   const tokens = prefix.trim().split(/\s+/).filter(Boolean);
@@ -105,6 +110,12 @@ function ttrArgumentCompletions(prefix: string) {
       { value: "refresh", label: "refresh", description: "Refresh the name if TTR owns it" },
       { value: "--force", label: "--force", description: "Overwrite an explicit name when refreshing" },
     ].filter(item => item.value.startsWith(current));
+  }
+  if (tokens[0] === "list") {
+    const current = hasTrailingSpace ? "" : tokens.at(-1)!;
+    const items = [{ value: "--active", label: "--active", description: "Show active Managers only" }]
+      .filter(item => !tokens.includes(item.value) && item.value.startsWith(current));
+    return items.length > 0 ? items : null;
   }
   if (tokens[0] === "unregister") {
     const current = hasTrailingSpace ? "" : tokens.at(-1)!;
@@ -151,7 +162,7 @@ export default function triageControlPlane(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("ttr", {
-    description: "TTR control plane: register, manager, managers, list, unregister, deactivate, or autoname. Domains default to the current repository name.",
+    description: "TTR control plane: register, status, list, unregister, deactivate, or autoname. Domains default to the current repository name.",
     getArgumentCompletions: ttrArgumentCompletions,
     handler: async (args, ctx) => {
       const [subcommand = "", ...rest] = (args || "").trim().split(/\s+/).filter(Boolean);
@@ -178,21 +189,21 @@ export default function triageControlPlane(pi: ExtensionAPI) {
         ctx.ui.notify(`TTR session naming: ${enabled ? "on" : "off"}${updated ? " (updated)" : ""}`, "info");
         return;
       }
-      if (subcommand === "manager" || subcommand === "poc") {
-        const domain = parseDomain(subcommandArgs, await domainFromContext(pi, ctx.cwd), "/ttr manager [domain]");
+      if (subcommand === "status" || subcommand === "manager" || subcommand === "poc") {
+        const domain = parseDomain(subcommandArgs, await domainFromContext(pi, ctx.cwd), "/ttr status [domain]");
         ctx.ui.notify(JSON.stringify(await plane.resolvePoc(domain), null, 2), "info");
         await syncSessionName(ctx);
         return;
       }
-      if (subcommand === "managers" || subcommand === "pocs") {
-        if (subcommandArgs) throw new Error("Usage: /ttr managers");
+      if (subcommand === "pocs") {
+        if (subcommandArgs) throw new Error("Usage: /ttr pocs");
         ctx.ui.notify(JSON.stringify(await plane.listPocs(), null, 2), "info");
         await syncSessionName(ctx);
         return;
       }
       if (subcommand === "list") {
-        if (subcommandArgs) throw new Error("Usage: /ttr list");
-        ctx.ui.notify(pocTable(await plane.listPocs(true)), "info");
+        const { activeOnly } = parseListArgs(subcommandArgs);
+        ctx.ui.notify(pocTable(await plane.listPocs(!activeOnly)), "info");
         await syncSessionName(ctx);
         return;
       }
@@ -210,7 +221,7 @@ export default function triageControlPlane(pi: ExtensionAPI) {
         await syncSessionName(ctx);
         return;
       }
-      throw new Error("Usage: /ttr <register|manager|managers|list|unregister|deactivate|autoname> [domain]");
+      throw new Error("Usage: /ttr <register|status|list|unregister|deactivate|autoname> [domain]");
     },
   });
 

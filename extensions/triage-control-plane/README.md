@@ -84,14 +84,14 @@ Do not substitute a name, fabricate a target, or silently reroute an unreachable
 /ttr register pi-extensions ttr agent-workflows handoff  # register the same Manager for a canonical domain plus aliases
 /ttr register payments --session-id <pi-session-id>      # explicit Manager; positional values remain domains/aliases
 /ttr register payments ttr --replace                     # required to replace any active Manager in the set
-/ttr manager                                             # inspect the Manager for the current repository domain
-/ttr manager payments
-/ttr managers                                            # JSON: active canonical Managers
-/ttr list                                                # table: friendly Manager name, domains, aliases, and active status
+/ttr status                                              # inspect the Manager for the current repository domain
+/ttr status payments
+/ttr list                                                # table: all friendly Managers, domains, aliases, and statuses
+/ttr list --active                                       # table: active Managers only
 /ttr unregister payments                                 # remove one domain; promotes another alias if needed
 /ttr unregister payments --all                           # remove the entire Manager and every domain alias
-/ttr deactivate                                          # deactivate the Manager for the current repository domain
-/ttr deactivate payments
+/ttr deactivate                                          # temporarily stop routing while retaining the Manager record
+/ttr deactivate payments                                  # re-register the domain to reactivate it
 ```
 
 ## Tool examples

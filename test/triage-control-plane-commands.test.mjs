@@ -73,6 +73,8 @@ test("/ttr list renders aliases once with the shared POC status", async () => {
   await commands.get("ttr").handler("deactivate billing", context);
   await commands.get("ttr").handler("list", context);
   assert.match(notifications.at(-1).message, /payments\s+billing, checkout\s+session-123\s+inactive/);
+  await commands.get("ttr").handler("list --active", context);
+  assert.doesNotMatch(notifications.at(-1).message, /payments/);
 });
 
 test("/ttr unregister removes a domain or an entire Manager", async () => {
@@ -125,13 +127,14 @@ test("/ttr consolidates POC commands and derives an omitted domain from the repo
 
   assert.deepEqual([...commands.keys()], ["ttr"]);
   const complete = commands.get("ttr").getArgumentCompletions;
-  assert.deepEqual(complete("").map(({ value }) => value), ["register", "manager", "managers", "list", "unregister", "deactivate", "autoname"]);
-  assert.deepEqual(complete("man").map(({ value }) => value), ["manager", "managers"]);
+  assert.deepEqual(complete("").map(({ value }) => value), ["register", "status", "list", "unregister", "deactivate", "autoname"]);
+  assert.deepEqual(complete("st").map(({ value }) => value), ["status"]);
   assert.deepEqual(complete("register ").map(({ value }) => value), ["--replace", "--session-id"]);
+  assert.deepEqual(complete("list ").map(({ value }) => value), ["--active"]);
 
   await commands.get("ttr").handler("register payments", context);
-  await commands.get("ttr").handler("manager", context);
-  await commands.get("ttr").handler("managers", context);
+  await commands.get("ttr").handler("status", context);
+  await commands.get("ttr").handler("list --active", context);
   await commands.get("ttr").handler("deactivate", context);
 
   assert.equal(notifications[0].message, "TTR Manager registered: payments → session-123");
@@ -146,6 +149,6 @@ test("/ttr consolidates POC commands and derives an omitted domain from the repo
     registeredAt: manager.registeredAt,
     active: true,
   });
-  assert.equal(JSON.parse(notifications[2].message).length, 1);
+  assert.match(notifications[2].message, /payments/);
   assert.equal(notifications[3].message, "TTR Manager deactivated: payments");
 });
