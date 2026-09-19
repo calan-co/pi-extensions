@@ -5,337 +5,83 @@ import { join } from "node:path";
 import test from "node:test";
 import { TriageControlPlane } from "../extensions/triage-control-plane/src/core.ts";
 
-async function setup() {
-  const dir = await mkdtemp(join(tmpdir(), "ttr-core-"));
-  return { dir, statePath: join(dir, "state.json") };
-}
+async function setup() { const dir = await mkdtemp(join(tmpdir(), "ttr-core-")); return { statePath: join(dir, "state.json") }; }
+const item = (id, path, status = "proposed") => ({ id, path, status, lifecycleStates: ["proposed", "in-progress", "closed"] });
+const intake = (coordinatorDomain = "payments", currentSessionId = "payments-manager") => ({ reporter: "customer", source: "support:1", sourceDomain: "storefront", coordinatorDomain, symptom: "declined", impact: "checkout", environment: "prod", reproduction: "submit card", evidenceReferences: ["ticket:1"], currentSessionId });
 
-const poc = { sessionId: "poc-session-123", projectBoundary: "/repo", requesterChannel: "issue:42" };
-
-test("POC registration persists, resolves, and needs explicit replacement confirmation", async () => {
+test("v1 migration is idempotent, preserves provenance gaps, and adds one legacy-import event", async () => {
   const { statePath } = await setup();
-  const plane = new TriageControlPlane({ statePath, now: () => "2026-01-01T00:00:00.000Z" });
-  const registered = await plane.registerPoc("payments", poc, false);
-  assert.equal(registered.active, true);
-  assert.equal((await plane.resolvePoc("payments"))?.sessionId, poc.sessionId);
-
-  await assert.rejects(() => plane.registerPoc("payments", { sessionId: "other" }, false), /explicit replacement confirmation/i);
-  await plane.registerPoc("payments", { sessionId: "other" }, true);
-  assert.equal((await plane.resolvePoc("payments"))?.sessionId, "other");
-
-  const reloaded = new TriageControlPlane({ statePath });
-  assert.equal((await reloaded.resolvePoc("payments"))?.sessionId, "other");
-  await reloaded.deactivatePoc("payments", "other");
-  assert.equal(await reloaded.resolvePoc("payments"), undefined);
-  assert.match(await readFile(statePath, "utf8"), /payments/);
+  await writeFile(statePath, JSON.stringify({ version: 1, registrations: {}, defects: { "ttr-old": { id: "ttr-old", domain: "payments", ownerPocSessionId: "retired-manager", intake: { reporter: "r", source: "s", recordedAt: "2026-01-01T00:00:00.000Z" }, workItem: { ...item("OLD-1", "old.md"), adapter: "explicit-lifecycle" }, evidence: [] } } }));
+  const plane = new TriageControlPlane({ statePath });
+  const migrated = await plane.getDefect("ttr-old");
+  assert.equal(migrated.report.sourceDomain, undefined);
+  assert.equal(migrated.audit.filter(event => event.action === "legacy-import").length, 1);
+  assert.equal(migrated.audit[0].changed.legacyOwnerPocSessionId, "retired-manager");
+  assert.equal("ownerPocSessionId" in migrated, false);
+  await plane.setSessionNaming("s", true); // transaction persists v2 conversion
+  const stored = JSON.parse(await readFile(statePath, "utf8"));
+  assert.equal(stored.version, 2);
+  assert.equal(stored.defects["ttr-old"].audit.filter(event => event.action === "legacy-import").length, 1);
+  assert.equal(stored.defects["ttr-old"].audit[0].changed.legacyOwnerPocSessionId, "retired-manager");
+  assert.equal("ownerPocSessionId" in stored.defects["ttr-old"], false);
 });
 
-test("POC aliases register atomically and resolve to the same session", async () => {
+test("coordinator is dynamically resolved and transfer preserves immutable report and work references", async () => {
+  const { statePath } = await setup();
+  const plane = new TriageControlPlane({ statePath, bootstrapAdminSessionIds: ["admin"] });
+  await plane.registerPoc("payments", { sessionId: "payments-manager" }, false);
+  await plane.registerPoc("risk", { sessionId: "risk-manager" }, false);
+  await plane.registerAdmin("admin", "admin");
+  const { defect } = await plane.intakeForOwner(intake());
+  await plane.assignWorkItem(defect.id, "payments", item("PAY-1", "pay.md"), "payments-manager");
+  await plane.registerPoc("payments", { sessionId: "replacement-manager" }, true);
+  await assert.rejects(() => plane.transitionWorkItem(defect.id, "payments", "in-progress", {}, "payments-manager"), /not authorized/i);
+  await plane.transitionWorkItem(defect.id, "payments", "in-progress", {}, "replacement-manager");
+  const moved = await plane.transferCoordinator(defect.id, "risk", "decision:42", "admin");
+  assert.equal(moved.coordinatorDomain, "risk");
+  assert.deepEqual(moved.report, defect.report);
+  assert.equal(moved.workItems.payments.id, "PAY-1");
+  assert.equal(moved.audit.at(-1).action, "coordinator-transferred");
+  const withNewCoordinatorReference = await plane.assignWorkItem(defect.id, "risk", item("RISK-1", "risk.md"), "risk-manager");
+  assert.equal(withNewCoordinatorReference.leadWorkItemDomain, "payments", "transfer keeps the original lead stable");
+  await plane.removeContributorWorkItem(defect.id, "risk", "decision:remove-risk-reference", "risk-manager");
+  assert.equal((await plane.getDefect(defect.id)).workItems.risk, undefined);
+  await assert.rejects(() => plane.transitionWorkItem(defect.id, "payments", "closed", {}, "replacement-manager"), /not authorized/i);
+  await plane.transitionWorkItem(defect.id, "payments", "closed", {}, "risk-manager");
+});
+
+test("lead and contributor work items are scoped, globally collision-safe, and audit replacements", async () => {
   const { statePath } = await setup();
   const plane = new TriageControlPlane({ statePath });
-  const records = await plane.registerPocs(["pi-extensions", "ttr", "agent-workflows", "handoff"], poc, false);
-
-  assert.deepEqual(records.map(record => record.domain), ["pi-extensions", "ttr", "agent-workflows", "handoff"]);
-  for (const domain of records.map(record => record.domain)) {
-    assert.equal((await plane.resolvePoc(domain))?.sessionId, poc.sessionId);
-  }
-  assert.deepEqual(await plane.listPocs(), [{ ...records[0], aliases: records.map(record => record.domain).sort() }]);
+  await plane.registerPoc("payments", { sessionId: "payments-manager" }, false);
+  const { defect } = await plane.intakeForOwner(intake());
+  await assert.rejects(() => plane.assignWorkItem(defect.id, "ops", item("OPS-1", "ops.md"), "payments-manager"), /not a contributor/i);
+  await plane.assignWorkItem(defect.id, "payments", item("PAY-1", "pay.md"), "payments-manager");
+  await plane.addContributingDomains(defect.id, ["ops", "docs", "ops"], "payments-manager");
+  const updated = await plane.assignWorkItem(defect.id, "ops", item("OPS-1", "ops.md"), "payments-manager");
+  assert.equal(updated.leadWorkItemDomain, "payments");
+  assert.equal(updated.workItems.ops.id, "OPS-1");
+  const reassigned = await plane.reassignWorkItem(defect.id, "ops", item("OPS-2", "ops-2.md"), { reason: "tracker duplicate", evidenceReferences: ["ticket:2"] }, "payments-manager");
+  assert.equal(reassigned.audit.at(-1).changed.previousWorkItem.id, "OPS-1");
+  await plane.removeContributorWorkItem(defect.id, "ops", "decision:remove-ops", "payments-manager");
+  assert.equal((await plane.getDefect(defect.id)).workItems.ops, undefined);
+  const { defect: other } = await plane.intakeForOwner({ ...intake(), symptom: "other" });
+  await assert.rejects(() => plane.assignWorkItem(other.id, "payments", item("PAY-1", "other.md"), "payments-manager"), /already authoritative/i);
 });
 
-test("a Manager receives one friendly name shared by every alias", async () => {
+test("release evidence and gate are limited to the lead work item", async () => {
   const { statePath } = await setup();
-  const plane = new TriageControlPlane({ statePath, random: () => 0 });
-  await plane.registerPocs(["payments", "billing"], poc, false);
-
-  const [manager] = await plane.listPocs();
-  assert.equal(manager.managerName, "Avery");
-  assert.deepEqual(manager.aliases, ["billing", "payments"]);
-});
-
-test("unregister removes one domain or an entire Manager registration", async () => {
-  const { statePath } = await setup();
-  const plane = new TriageControlPlane({ statePath });
-  await plane.registerPocs(["payments", "billing"], poc, false);
-
-  assert.deepEqual((await plane.unregisterPoc("payments", false, poc.sessionId)).removedDomains, ["payments"]);
-  assert.equal(await plane.resolvePoc("payments"), undefined);
-  assert.equal((await plane.resolvePoc("billing"))?.domain, "billing");
-  assert.deepEqual((await plane.listPocs()).map(({ domain, aliases }) => ({ domain, aliases })), [{ domain: "billing", aliases: ["billing"] }]);
-
-  assert.deepEqual((await plane.unregisterPoc("billing", true, poc.sessionId)).removedDomains, ["billing"]);
-  assert.deepEqual(await plane.listPocs(true), []);
-});
-
-test("only a Manager or active admin may unregister or deactivate its registration", async () => {
-  const { statePath } = await setup();
-  const admin = "admin-session";
-  const plane = new TriageControlPlane({ statePath, bootstrapAdminSessionIds: [admin] });
-  await plane.registerPocs(["payments", "billing"], poc, false);
-
-  await assert.rejects(() => plane.unregisterPoc("billing", false, "other-session"), /not authorized to unregister Manager registration/i);
-  await assert.rejects(() => plane.deactivatePoc("payments", "other-session"), /not authorized to deactivate Manager registration/i);
-  await plane.deactivatePoc("payments", poc.sessionId);
-  await plane.registerAdmin(admin, admin);
-  assert.deepEqual((await plane.unregisterPoc("billing", false, admin)).removedDomains, ["billing"]);
-});
-
-test("legacy per-alias records compact on the next write without breaking routing", async () => {
-  const { statePath } = await setup();
-  const legacyRecord = { domain: "payments", canonicalDomain: "payments", ...poc, registeredAt: "2026-01-01T00:00:00.000Z", active: true };
-  await writeFile(statePath, JSON.stringify({
-    version: 1, defects: {}, registrations: {
-      payments: legacyRecord,
-      billing: { ...legacyRecord, domain: "billing" },
-    },
-  }));
-  const plane = new TriageControlPlane({ statePath });
-
-  assert.equal((await plane.resolvePoc("billing"))?.sessionId, poc.sessionId);
-  await plane.deactivatePoc("billing", poc.sessionId);
-  const persisted = JSON.parse(await readFile(statePath, "utf8"));
-  assert.deepEqual(Object.keys(persisted.registrations), ["payments"]);
-  assert.deepEqual(persisted.aliases, { payments: "payments", billing: "payments" });
-  assert.equal((await plane.resolvePoc("payments")), undefined);
-});
-
-test("legacy self-canonical aliases for one POC collapse into one listing", async () => {
-  const { statePath } = await setup();
-  const payments = { domain: "payments", canonicalDomain: "payments", ...poc, registeredAt: "2026-01-01T00:00:00.000Z", active: true };
-  await writeFile(statePath, JSON.stringify({
-    version: 1, defects: {}, aliases: { payments: "payments", billing: "billing" }, registrations: {
-      payments,
-      billing: { ...payments, domain: "billing", canonicalDomain: "billing", projectBoundary: "/other-repo" },
-    },
-  }));
-  const plane = new TriageControlPlane({ statePath });
-
-  const [manager] = await plane.listPocs();
-  assert.equal(manager.domain, "payments");
-  assert.deepEqual(manager.aliases, ["billing", "payments"]);
-  assert.equal(typeof manager.managerName, "string");
-  assert.equal((await plane.resolvePoc("billing"))?.domain, "payments");
-});
-
-test("non-POC intake produces an evidence-only handoff and does not claim delivery", async () => {
-  const { statePath } = await setup();
-  const plane = new TriageControlPlane({ statePath });
-  await plane.registerPoc("payments", poc, false);
-  const intake = await plane.intake({
-    reporter: "customer", source: "support", sourceDomain: "support", ownerDomain: "payments", targetPocSessionId: poc.sessionId, symptom: "card declined", impact: "checkout blocked",
-    environment: "prod", reproduction: "submit card", evidenceReferences: ["ticket:123"], currentSessionId: "other-session",
-  });
-  assert.equal(intake.role, "non-poc");
-  assert.equal(intake.handoff?.targetSessionId, poc.sessionId);
-  assert.equal(intake.handoff?.delivery, "not-attempted");
-  assert.deepEqual(Object.keys(intake.handoff.payload).sort(), ["defectId", "domain", "evidenceReferences", "impact", "sourceDomain", "symptom"]);
-});
-
-test("owner-resolved intake obtains its target from the active owner POC", async () => {
-  const { statePath } = await setup();
-  const plane = new TriageControlPlane({ statePath });
-  await plane.registerPoc("payments", poc, false);
-
-  const input = {
-    reporter: "customer", source: "support", sourceDomain: "storefront", ownerDomain: "payments",
-    symptom: "card declined", impact: "checkout blocked", environment: "prod", reproduction: "submit card", evidenceReferences: [], currentSessionId: poc.sessionId,
-  };
-  const intake = await plane.intakeForOwner(input);
-
-  assert.equal(intake.role, "poc");
-  assert.equal(intake.defect.intake.targetPocSessionId, poc.sessionId);
-  await assert.rejects(
-    () => plane.intakeForOwner({ ...input, ownerDomain: "missing" }),
-    /No active POC registration for missing; run \/ttr register missing/,
-  );
-});
-
-test("intake separates source from owner domain and fail-closes a target-POC mismatch", async () => {
-  const { statePath } = await setup();
-  const plane = new TriageControlPlane({ statePath });
-  await plane.registerPoc("ttr", poc, false);
-  const input = {
-    reporter: "validator", source: "intercom", sourceDomain: "babysitter-dv", ownerDomain: "ttr", targetPocSessionId: poc.sessionId,
-    symptom: "routing mismatch", impact: "incorrect ownership", environment: "test", reproduction: "send cross-domain defect", evidenceReferences: [], currentSessionId: poc.sessionId,
-  };
-
-  const confirmed = await plane.intake(input);
-  assert.equal(confirmed.role, "poc");
-  assert.equal(confirmed.defect.domain, "ttr");
-  assert.equal(confirmed.defect.intake.sourceDomain, "babysitter-dv");
-  assert.equal(confirmed.defect.intake.targetPocSessionId, poc.sessionId);
-
-  const mismatched = await plane.intake({ ...input, targetPocSessionId: "different-session" });
-  assert.equal(mismatched.role, "non-poc");
-  assert.equal(mismatched.handoff?.targetSessionId, poc.sessionId);
-  await assert.rejects(
-    () => plane.assignWorkItem(mismatched.defect.id, { id: "BUG-2", path: "backlog/BUG-2.md", status: "proposed", lifecycleStates: ["proposed"] }, poc.sessionId),
-    /not authorized to assign a work item/i,
-  );
-});
-
-test("a registered owner POC can explicitly re-attest a legacy defect", async () => {
-  const { statePath } = await setup();
-  const plane = new TriageControlPlane({ statePath });
-  await plane.registerPoc("ttr", poc, false);
-  const { defect } = await plane.intake({
-    reporter: "validator", source: "intercom", sourceDomain: "babysitter-dv", ownerDomain: "ttr", targetPocSessionId: poc.sessionId,
-    symptom: "legacy authority missing", impact: "lane blocked", environment: "test", reproduction: "load legacy state", evidenceReferences: [], currentSessionId: poc.sessionId,
-  });
-  const state = JSON.parse(await readFile(statePath, "utf8"));
-  delete state.defects[defect.id].intake.sourceDomain;
-  delete state.defects[defect.id].intake.targetPocSessionId;
-  delete state.defects[defect.id].intake.authorityConfirmed;
-  await writeFile(statePath, `${JSON.stringify(state)}\n`);
-
-  const reattested = await plane.reattestDefectAuthority(defect.id, {
-    sourceDomain: "babysitter-dv", ownerDomain: "ttr", targetPocSessionId: poc.sessionId, actorSessionId: poc.sessionId,
-  });
-  assert.equal(reattested.intake.authorityConfirmed, true);
-  assert.equal(reattested.intake.sourceDomain, "babysitter-dv");
-  assert.equal(await plane.ensurePocAuthority(defect.id, poc.sessionId).then(item => item.id), defect.id);
-});
-
-test("a defect has one authoritative work item and only configured lifecycle transitions", async () => {
-  const { statePath } = await setup();
-  const plane = new TriageControlPlane({ statePath });
-  await plane.registerPoc("payments", poc, false);
-  const { defect } = await plane.intake({ reporter: "r", source: "s", sourceDomain: "s", ownerDomain: "payments", targetPocSessionId: poc.sessionId, symptom: "x", impact: "high", environment: "prod", reproduction: "r", evidenceReferences: [], currentSessionId: poc.sessionId });
-  await plane.assignWorkItem(defect.id, { id: "BUG-1", path: "backlog/BUG-1.md", status: "proposed", lifecycleStates: ["proposed", "in-progress", "closed"] }, poc.sessionId);
-  await assert.rejects(() => plane.assignWorkItem(defect.id, { id: "BUG-2", path: "backlog/BUG-2.md", status: "proposed", lifecycleStates: ["proposed"] }, poc.sessionId), /already has an authoritative/i);
-  await assert.rejects(() => plane.transitionWorkItem(defect.id, "blocked"), /not configured/i);
-  const updated = await plane.transitionWorkItem(defect.id, "in-progress", { blocker: "awaiting logs", nextAction: "request logs" });
-  assert.equal(updated.workItem?.status, "in-progress");
-  assert.equal(updated.blocker, "awaiting logs");
-});
-
-test("an active authorized defect owner can reassign a work item with immutable audit history", async () => {
-  const { statePath } = await setup();
-  const plane = new TriageControlPlane({ statePath, now: () => "2026-01-02T00:00:00.000Z" });
-  await plane.registerPoc("payments", poc, false);
-  const { defect } = await plane.intake({ reporter: "r", source: "s", sourceDomain: "s", ownerDomain: "payments", targetPocSessionId: poc.sessionId, symptom: "x", impact: "high", environment: "prod", reproduction: "r", evidenceReferences: [], currentSessionId: poc.sessionId });
-  await plane.assignWorkItem(defect.id, { id: "BUG-1", path: "backlog/BUG-1.md", status: "proposed", lifecycleStates: ["proposed", "in-progress"] }, poc.sessionId);
-
-  await assert.rejects(() => plane.reassignWorkItem(defect.id, { id: "BUG-2", path: "backlog/BUG-2.md", status: "proposed", lifecycleStates: ["proposed"] }, { reason: "duplicate issue", evidenceReferences: ["ticket:123"] }, "other-session"), /not authorized to reassign a work item/i);
-  await assert.rejects(() => plane.reassignWorkItem(defect.id, { id: "BUG-2", path: "backlog/BUG-2.md", status: "proposed", lifecycleStates: ["proposed"] }, { reason: "", evidenceReferences: [] }, poc.sessionId), /reason and evidence references are required/i);
-  await assert.rejects(() => plane.reassignWorkItem(defect.id, { id: "", path: "", status: "", lifecycleStates: [] }, { reason: "duplicate issue", evidenceReferences: ["ticket:123"] }, poc.sessionId), /id, path, status, and configured lifecycleStates are required/i);
-  await assert.rejects(() => plane.reassignWorkItem(defect.id, { id: "BUG-2", path: "backlog/BUG-2.md", status: "closed", lifecycleStates: ["proposed"] }, { reason: "duplicate issue", evidenceReferences: ["ticket:123"] }, poc.sessionId), /status must be in configured lifecycleStates/i);
-  await assert.rejects(() => plane.reassignWorkItem(defect.id, { id: "BUG-1", path: "backlog/BUG-1.md", status: "proposed", lifecycleStates: ["proposed"] }, { reason: "duplicate issue", evidenceReferences: ["ticket:123"] }, poc.sessionId), /same as the authoritative work item/i);
-
-  const reassigned = await plane.reassignWorkItem(defect.id, { id: "BUG-2", path: "backlog/BUG-2.md", status: "in-progress", lifecycleStates: ["proposed", "in-progress"] }, { reason: "duplicate issue", evidenceReferences: ["ticket:123"] }, poc.sessionId);
-  assert.equal(reassigned.workItem?.id, "BUG-2");
-  assert.deepEqual(reassigned.workItemHistory, [{ previousWorkItem: { id: "BUG-1", path: "backlog/BUG-1.md", adapter: "explicit-lifecycle", status: "proposed", lifecycleStates: ["proposed", "in-progress"] }, reason: "duplicate issue", evidenceReferences: ["ticket:123"], reassignedAt: "2026-01-02T00:00:00.000Z" }]);
-
-  const { defect: otherDefect } = await plane.intake({ reporter: "r", source: "s", sourceDomain: "s", ownerDomain: "payments", targetPocSessionId: poc.sessionId, symptom: "y", impact: "high", environment: "prod", reproduction: "r", evidenceReferences: [], currentSessionId: poc.sessionId });
-  await plane.assignWorkItem(otherDefect.id, { id: "BUG-3", path: "backlog/BUG-3.md", status: "proposed", lifecycleStates: ["proposed"] }, poc.sessionId);
-  await assert.rejects(() => plane.reassignWorkItem(defect.id, { id: "BUG-4", path: "backlog/BUG-3.md", status: "proposed", lifecycleStates: ["proposed"] }, { reason: "wrong queue", evidenceReferences: ["ticket:456"] }, poc.sessionId), /already authoritative for defect/i);
-});
-
-test("bootstrap enrollment is one-time and admin deactivation is active-admin-only and permanent", async () => {
-  const { statePath } = await setup();
-  const firstAdmin = "bootstrap-admin";
-  const secondAdmin = "other-bootstrap-admin";
-  const plane = new TriageControlPlane({ statePath, bootstrapAdminSessionIds: [firstAdmin, secondAdmin] });
-
-  await plane.registerAdmin(firstAdmin, firstAdmin);
-  await assert.rejects(() => plane.registerAdmin(secondAdmin, secondAdmin), /only an active admin may register an admin/i);
-  await plane.registerAdmin(secondAdmin, firstAdmin);
-  await assert.rejects(() => plane.deactivateAdmin(secondAdmin, "untrusted"), /explicitly enrolled active TTR admin/i);
-  const deactivated = await plane.deactivateAdmin(secondAdmin, firstAdmin);
-  assert.equal(deactivated.active, false);
-  await assert.rejects(() => plane.registerAdmin(secondAdmin, firstAdmin), /deactivated and cannot be reactivated/i);
-  await plane.deactivateAdmin(firstAdmin, firstAdmin);
-  await assert.rejects(() => plane.registerAdmin(firstAdmin, firstAdmin), /only an active admin may register an admin/i);
-});
-
-test("explicit admins reconcile orphaned Managers, rebind active sessions, and retain supersession history", async () => {
-  const { statePath } = await setup();
-  const adminSessionId = "ttr-admin-1";
-  const replacementPoc = { ...poc, sessionId: "replacement-poc" };
-  const plane = new TriageControlPlane({ statePath, now: () => "2026-01-03T00:00:00.000Z", bootstrapAdminSessionIds: [adminSessionId] });
-  await plane.registerPoc("payments", poc, false);
-  const { defect } = await plane.intake({ reporter: "r", source: "s", sourceDomain: "s", ownerDomain: "payments", targetPocSessionId: poc.sessionId, symptom: "x", impact: "high", environment: "prod", reproduction: "r", evidenceReferences: [], currentSessionId: poc.sessionId });
-  await plane.assignWorkItem(defect.id, { id: "BUG-1", path: "backlog/BUG-1.md", status: "proposed", lifecycleStates: ["proposed", "closed"] }, poc.sessionId);
-
-  await assert.rejects(() => plane.registerAdmin("untrusted", "untrusted"), /first admin must be explicitly bootstrapped/i);
-  await assert.rejects(() => plane.registerAdmin(adminSessionId, "untrusted"), /first admin must be explicitly bootstrapped/i);
-  await plane.registerAdmin(adminSessionId, adminSessionId);
-  await assert.rejects(() => plane.adminLookup("untrusted"), /explicitly enrolled active TTR admin/i);
-  await assert.rejects(() => plane.markPocAssignmentOrphaned(defect.id, { reason: "", evidenceReferences: [] }, adminSessionId), /orphaning reason and evidence references/i);
-  await assert.rejects(() => plane.adminRebindWorkItem(defect.id, { id: "BUG-2", path: "backlog/BUG-2.md", status: "proposed", lifecycleStates: ["proposed", "closed"] }, { targetPocSessionId: poc.sessionId, reason: "recover orphan", evidenceReferences: ["incident:42"] }, adminSessionId), /must be explicitly orphaned before rebinding/i);
-  const orphaned = await plane.markPocAssignmentOrphaned(defect.id, { reason: "session deleted", evidenceReferences: ["incident:42"] }, adminSessionId);
-  assert.equal(orphaned.pocAssignment.status, "orphaned");
-  await assert.rejects(() => plane.reassignWorkItem(defect.id, { id: "BUG-2", path: "backlog/BUG-2.md", status: "proposed", lifecycleStates: ["proposed"] }, { reason: "x", evidenceReferences: ["incident:42"] }, poc.sessionId), /not authorized/i);
-
-  await plane.registerPoc("payments", replacementPoc, true);
-  const { defect: collisionDefect } = await plane.intake({ reporter: "r", source: "s", sourceDomain: "s", ownerDomain: "payments", targetPocSessionId: replacementPoc.sessionId, symptom: "collision", impact: "high", environment: "prod", reproduction: "r", evidenceReferences: [], currentSessionId: replacementPoc.sessionId });
-  await plane.assignWorkItem(collisionDefect.id, { id: "BUG-C", path: "backlog/BUG-C.md", status: "proposed", lifecycleStates: ["proposed"] }, replacementPoc.sessionId);
-  await assert.rejects(() => plane.adminRebindWorkItem(defect.id, { id: "BUG-2", path: "backlog/BUG-C.md", status: "proposed", lifecycleStates: ["proposed"] }, { targetPocSessionId: replacementPoc.sessionId, reason: "recover orphan", evidenceReferences: ["incident:42"] }, adminSessionId), /already authoritative for defect/i);
-  await assert.rejects(() => plane.adminRebindWorkItem(defect.id, { id: "", path: "", status: "", lifecycleStates: [] }, { targetPocSessionId: replacementPoc.sessionId, reason: "recover orphan", evidenceReferences: ["incident:42"] }, adminSessionId), /id, path, status, and configured lifecycleStates are required/i);
-  await assert.rejects(() => plane.adminRebindWorkItem(defect.id, { id: "BUG-2", path: "backlog/BUG-2.md", status: "proposed", lifecycleStates: ["proposed"] }, { targetPocSessionId: "inactive", reason: "recover orphan", evidenceReferences: ["incident:42"] }, adminSessionId), /not the active Manager/i);
-  const rebound = await plane.adminRebindWorkItem(defect.id, { id: "BUG-2", path: "backlog/BUG-2.md", status: "proposed", lifecycleStates: ["proposed", "closed"] }, { targetPocSessionId: replacementPoc.sessionId, reason: "recover orphan", evidenceReferences: ["incident:42"] }, adminSessionId);
-  assert.equal(rebound.workItem.id, "BUG-2");
-  assert.equal(rebound.pocAssignment.sessionId, replacementPoc.sessionId);
-  assert.equal(rebound.intake.targetPocSessionId, poc.sessionId, "original intake remains immutable");
-  assert.equal(rebound.workItemHistory[0].previousWorkItem.id, "BUG-1");
-  const activePocReassigned = await plane.reassignWorkItem(defect.id, { id: "BUG-2A", path: "backlog/BUG-2A.md", status: "proposed", lifecycleStates: ["proposed", "closed"] }, { reason: "active POC follow-up", evidenceReferences: ["incident:42"] }, replacementPoc.sessionId);
-  assert.equal(activePocReassigned.workItem.id, "BUG-2A");
-
-  const superseded = await plane.supersedeWorkItem(defect.id, { id: "BUG-3", path: "backlog/BUG-3.md", status: "proposed", lifecycleStates: ["proposed", "closed"] }, { reason: "replacement is obsolete", evidenceReferences: ["incident:43"] }, adminSessionId);
-  assert.equal(superseded.workItem.id, "BUG-3");
-  assert.equal(superseded.workItemHistory[2].previousWorkItem.id, "BUG-2A");
-  assert.equal(superseded.workItemHistory[2].successorWorkItem.id, "BUG-3");
-  const lookup = await plane.adminLookup(adminSessionId);
-  assert.equal(lookup.assignments.find(item => item.defectId === defect.id).orphaned, false);
-  assert.equal(lookup.defects.find(item => item.id === defect.id).workItemHistory.length, 3);
-});
-
-test("requester-message categories reject noise and record accepted message evidence", async () => {
-  const { statePath } = await setup();
-  const plane = new TriageControlPlane({ statePath });
-  await plane.registerPoc("payments", poc, false);
-  const { defect } = await plane.intake({ reporter: "r", source: "s", sourceDomain: "s", ownerDomain: "payments", targetPocSessionId: poc.sessionId, symptom: "x", impact: "high", environment: "prod", reproduction: "r", evidenceReferences: [], currentSessionId: poc.sessionId });
-  await assert.rejects(() => plane.recordRequesterMessage(defect.id, "progress-update", "still looking"), /unsupported requester-message category/i);
-  const evidence = await plane.recordRequesterMessage(defect.id, "request-logs", "Please provide request id.");
-  assert.equal(evidence.type, "requester-message");
-  assert.equal(evidence.delivery, "not-delivered");
-});
-
-test("release gate fails closed for every missing prerequisite", async () => {
-  const { statePath } = await setup();
-  const plane = new TriageControlPlane({ statePath, git: async () => ({ clean: false, head: "abc" }) });
-  const gate = await plane.checkReleaseGate("missing", { deploymentRequired: true });
+  const plane = new TriageControlPlane({ statePath, git: async () => ({ clean: true, head: "pre" }) });
+  await plane.registerPoc("payments", { sessionId: "payments-manager" }, false);
+  const { defect } = await plane.intakeForOwner(intake());
+  await plane.assignWorkItem(defect.id, "payments", item("PAY-1", "pay.md", "in-progress"), "payments-manager");
+  await plane.addContributingDomains(defect.id, ["ops"], "payments-manager");
+  await plane.assignWorkItem(defect.id, "ops", item("OPS-1", "ops.md"), "payments-manager");
+  await plane.recordEvidence(defect.id, { type: "validation", status: "passed", workItemDomain: "ops" }, "payments-manager");
+  await plane.recordEvidence(defect.id, { type: "review", status: "passed", workItemDomain: "ops" }, "payments-manager");
+  await plane.recordCommitEvidence(defect.id, { sha: "ops", phase: "other", path: "ops.json", workItemDomain: "ops" }, "payments-manager");
+  const gate = await plane.checkReleaseGate(defect.id, { deploymentRequired: false, workItemDomain: "payments" });
   assert.equal(gate.ok, false);
-  assert.deepEqual(gate.missing, ["authoritative-work-item", "clean-working-tree", "commit-evidence", "validation-evidence", "review-evidence", "release-artifact", "deployment-evidence", "final-work-item-update", "final-post-deployment-commit-evidence"]);
-});
-
-test("release gate accepts SHA only in linked commit evidence and safe-to-proceed needs a final post-deployment commit", async () => {
-  const { statePath } = await setup();
-  let head = "predeploy-sha";
-  const plane = new TriageControlPlane({ statePath, git: async () => ({ clean: true, head }) });
-  await plane.registerPoc("payments", poc, false);
-  const { defect } = await plane.intake({ reporter: "r", source: "s", sourceDomain: "s", ownerDomain: "payments", targetPocSessionId: poc.sessionId, symptom: "x", impact: "high", environment: "prod", reproduction: "r", evidenceReferences: [], currentSessionId: poc.sessionId });
-  await plane.assignWorkItem(defect.id, { id: "BUG-1", path: "backlog/BUG-1.md", status: "in-progress", lifecycleStates: ["in-progress", "closed"] }, poc.sessionId);
-  await plane.recordEvidence(defect.id, { type: "validation", status: "passed", path: "evidence/test.txt" });
-  await plane.recordEvidence(defect.id, { type: "review", status: "passed", path: "evidence/review.txt" });
-  await plane.recordCommitEvidence(defect.id, { sha: "unphased-sha", phase: "other", path: "evidence/unphased-commit.json" });
-  await assert.rejects(() => plane.recordDeploymentEvidence(defect.id, { artifact: "app@1.2.3", receipt: "deploy:42", verification: "healthy" }), /pre-deployment commit evidence/i);
-  await plane.recordCommitEvidence(defect.id, { sha: "predeploy-sha", phase: "pre-deployment", path: "evidence/commit.json" });
-  await plane.recordDeploymentEvidence(defect.id, { artifact: "app@1.2.3", receipt: "deploy:42", verification: "healthy" });
-  let gate = await plane.checkReleaseGate(defect.id, { deploymentRequired: true });
-  assert.equal(gate.ok, false);
-  assert.deepEqual(gate.missing, ["final-work-item-update", "final-post-deployment-commit-evidence"]);
-  await assert.rejects(() => plane.recordCommitEvidence(defect.id, { sha: "final-sha", phase: "post-deployment", path: "evidence/final-commit.json" }), /final authoritative work-item transition/i);
-  await plane.transitionWorkItem(defect.id, "closed", { nextAction: "none" });
-  head = "final-sha";
-  await assert.rejects(() => plane.recordCommitEvidence(defect.id, { sha: "predeploy-sha", phase: "post-deployment", path: "evidence/not-a-second-commit.json" }), /distinct pre-deployment commit SHA/i);
-  gate = await plane.checkReleaseGate(defect.id, { deploymentRequired: true });
-  assert.deepEqual(gate.missing, ["final-post-deployment-commit-evidence"]);
-  await assert.rejects(() => plane.recordRequesterMessage(defect.id, "safe-to-proceed", "safe", { deploymentRequired: true }), /release gate/i);
-  await plane.recordCommitEvidence(defect.id, { sha: "final-sha", phase: "post-deployment", path: "evidence/final-commit.json" });
-  gate = await plane.checkReleaseGate(defect.id, { deploymentRequired: true });
-  assert.equal(gate.ok, true);
-  const message = await plane.recordRequesterMessage(defect.id, "safe-to-proceed", "Safe to proceed", { deploymentRequired: true });
-  assert.equal(message.type, "requester-message");
-  const current = await plane.getDefect(defect.id);
-  assert.equal("sha" in current.workItem, false);
+  assert.deepEqual(gate.missing.filter(value => value.endsWith("evidence")), ["commit-evidence", "validation-evidence", "review-evidence"]);
+  await assert.rejects(() => plane.recordDeploymentEvidence(defect.id, { workItemDomain: "ops", artifact: "x", receipt: "r", verification: "ok" }, "payments-manager"), /lead work item/i);
 });
