@@ -148,6 +148,39 @@ ttr_admin_rebind_work_item({ defectId: "ttr-…", targetPocSessionId: "<replacem
 // Supersession retains both the obsolete item and named successor in immutable audit history.
 ttr_supersede_work_item({ defectId: "ttr-…", workItemId: "BUG-790", workItemPath: "backlog/BUG-790.md", status: "proposed", lifecycleStates: ["proposed", "closed"], reason: "BUG-789 obsolete", evidenceReferences: ["incident:43"] })
 
+### Admin reconciliation playbooks
+
+Use the admin tools—not direct edits to `state.json`—to repair routing records. They append audit history; they never delete the original defect or work-item record.
+
+**Orphaned Manager/session:** first inspect the defect and its computed assignment state, then mark the assignment orphaned with the incident reference. Rebinding deliberately fails until this explicit orphan step has happened.
+
+```ts
+const record = ttr_admin_lookup({ defectId: "ttr-…" })
+ttr_mark_poc_assignment_orphaned({
+  defectId: "ttr-…", reason: "Manager session was retired", evidenceReferences: ["incident:INC-42"]
+})
+ttr_admin_rebind_work_item({
+  defectId: "ttr-…", targetPocSessionId: "<active replacement Manager session>",
+  workItemId: "wi-006", workItemPath: "backlog/006-example.md", status: "ready",
+  lifecycleStates: ["proposed", "ready", "in-progress", "ready-for-review", "closed"],
+  reason: "restore ownership after session retirement", evidenceReferences: ["incident:INC-42"]
+})
+```
+
+The replacement session must already be the active registered Manager for the defect domain. `ttr_admin_rebind_work_item` rejects another defect’s current item ID/path and retains the previous assignment/item snapshots in history.
+
+**Obsolete work item:** when the active Manager is still valid but its current work item is wrong or replaced, use supersession instead. It retains the predecessor and links the named successor; it is not an authorization to start a lane or release.
+
+```ts
+ttr_supersede_work_item({
+  defectId: "ttr-…", workItemId: "wi-007", workItemPath: "backlog/007-replacement.md", status: "ready",
+  lifecycleStates: ["proposed", "ready", "in-progress", "closed"],
+  reason: "canonical tracker replaced wi-006", evidenceReferences: ["tracker:wi-007"]
+})
+```
+
+**Manager retirement:** `/ttr deactivate [domain]` is reversible; `/ttr unregister <domain> [--all]` removes routing. Each is permitted only to that Manager session or an active TTR admin. Use `ttr_deactivate_admin` only for permanent admin revocation.
+
 // Required supported-lane preamble to pass into any diagnosis/review/validation/implementation lane:
 ttr_prepare_work_lane({ defectId: "ttr-…", lane: "diagnosis" })
 
