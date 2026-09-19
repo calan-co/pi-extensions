@@ -35,6 +35,7 @@ Do not edit `state.json` directly. TTR has no external transport: requester-mess
 /ttr register --admin [session-id]
 /ttr status [domain] [--json]
 /ttr list [--active] [--json]
+/ttr list [--active] --select  # select a registered persisted Pi session, then resume it here
 /ttr list --admin
 /ttr ui                         # inspect a defect or transfer coordinator as admin
 /ttr unregister [domain] [--all]

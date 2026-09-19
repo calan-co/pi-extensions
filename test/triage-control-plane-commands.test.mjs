@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-async function loadExtension() { process.env.PI_CODING_AGENT_DIR = await mkdtemp(join(tmpdir(), "ttr-command-state-")); process.env.TTR_ADMIN_SESSION_IDS = "admin"; return (await import(`../extensions/triage-control-plane/index.ts?test=${Date.now()}-${Math.random()}`)).default; }
+async function loadModule() { process.env.PI_CODING_AGENT_DIR = await mkdtemp(join(tmpdir(), "ttr-command-state-")); process.env.TTR_ADMIN_SESSION_IDS = "admin"; return import(`../extensions/triage-control-plane/index.ts?test=${Date.now()}-${Math.random()}`); }
+async function loadExtension() { return (await loadModule()).default; }
 function setup(sessionId = "manager", sessionName = "Manager session") { const commands = new Map(), tools = new Map(), notifications = []; return { commands, tools, notifications, api: { getSessionName: () => sessionName, on() {}, registerCommand(name, spec) { commands.set(name, spec); }, registerTool(spec) { tools.set(spec.name, spec); }, async exec(command, args) { if (args.includes("--show-toplevel")) return { code: 0, stdout: "/repo/payments\n" }; if (args[0] === "status") return { code: 0, stdout: "" }; return { code: 0, stdout: "head" }; } }, context: { cwd: "/repo/payments", sessionManager: { getSessionId: () => sessionId }, ui: { notify(message) { notifications.push(message); }, input: async () => undefined, select: async () => undefined } } }; }
 const intake = { reporter: "r", source: "s", sourceDomain: "storefront", coordinatorDomain: "payments", symptom: "x", impact: "high", environment: "prod", reproduction: "r", evidenceReferences: [] };
 
@@ -45,6 +46,13 @@ test("/ttr list --admin renders an admin table without implying Manager names ar
   assert.match(notifications.at(-1), /^MANAGER\s+DOMAIN\s+SESSION\s+STATUS/m);
   assert.match(notifications.at(-1), /admin/);
   assert.doesNotMatch(notifications.at(-1), /^\s*\[/);
+});
+
+test("list selection resumes a selected registered Pi session", async () => {
+  const { selectTtrSession } = await loadModule(); const selected = [], context = { ui: { notify() {}, select: async () => selected.shift() }, switchSession: async path => { context.path = path; } };
+  selected.push("Payments work — payments [manager]", "Resume as current session");
+  await selectTtrSession(context, [{ domain: "payments", aliases: [], sessionId: "manager", active: true }], async () => [{ id: "manager", name: "Payments work", path: "/sessions/manager.jsonl" }]);
+  assert.equal(context.path, "/sessions/manager.jsonl");
 });
 
 test("transfer is available through UI and only calls the control plane through a current session", async () => {
