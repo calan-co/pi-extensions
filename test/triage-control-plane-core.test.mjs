@@ -217,6 +217,47 @@ test("an active authorized defect owner can reassign a work item with immutable 
   await assert.rejects(() => plane.reassignWorkItem(defect.id, { id: "BUG-4", path: "backlog/BUG-3.md", status: "proposed", lifecycleStates: ["proposed"] }, { reason: "wrong queue", evidenceReferences: ["ticket:456"] }, poc.sessionId), /already authoritative for defect/i);
 });
 
+test("explicit admins reconcile orphaned Managers, rebind active sessions, and retain supersession history", async () => {
+  const { statePath } = await setup();
+  const adminSessionId = "ttr-admin-1";
+  const replacementPoc = { ...poc, sessionId: "replacement-poc" };
+  const plane = new TriageControlPlane({ statePath, now: () => "2026-01-03T00:00:00.000Z", bootstrapAdminSessionIds: [adminSessionId] });
+  await plane.registerPoc("payments", poc, false);
+  const { defect } = await plane.intake({ reporter: "r", source: "s", sourceDomain: "s", ownerDomain: "payments", targetPocSessionId: poc.sessionId, symptom: "x", impact: "high", environment: "prod", reproduction: "r", evidenceReferences: [], currentSessionId: poc.sessionId });
+  await plane.assignWorkItem(defect.id, { id: "BUG-1", path: "backlog/BUG-1.md", status: "proposed", lifecycleStates: ["proposed", "closed"] }, poc.sessionId);
+
+  await assert.rejects(() => plane.registerAdmin("untrusted", "untrusted"), /first admin must be explicitly bootstrapped/i);
+  await assert.rejects(() => plane.registerAdmin(adminSessionId, "untrusted"), /first admin must be explicitly bootstrapped/i);
+  await plane.registerAdmin(adminSessionId, adminSessionId);
+  await assert.rejects(() => plane.adminLookup("untrusted"), /explicitly enrolled active TTR admin/i);
+  await assert.rejects(() => plane.markPocAssignmentOrphaned(defect.id, { reason: "", evidenceReferences: [] }, adminSessionId), /orphaning reason and evidence references/i);
+  const orphaned = await plane.markPocAssignmentOrphaned(defect.id, { reason: "session deleted", evidenceReferences: ["incident:42"] }, adminSessionId);
+  assert.equal(orphaned.pocAssignment.status, "orphaned");
+  await assert.rejects(() => plane.reassignWorkItem(defect.id, { id: "BUG-2", path: "backlog/BUG-2.md", status: "proposed", lifecycleStates: ["proposed"] }, { reason: "x", evidenceReferences: ["incident:42"] }, poc.sessionId), /not authorized/i);
+
+  await plane.registerPoc("payments", replacementPoc, true);
+  const { defect: collisionDefect } = await plane.intake({ reporter: "r", source: "s", sourceDomain: "s", ownerDomain: "payments", targetPocSessionId: replacementPoc.sessionId, symptom: "collision", impact: "high", environment: "prod", reproduction: "r", evidenceReferences: [], currentSessionId: replacementPoc.sessionId });
+  await plane.assignWorkItem(collisionDefect.id, { id: "BUG-C", path: "backlog/BUG-C.md", status: "proposed", lifecycleStates: ["proposed"] }, replacementPoc.sessionId);
+  await assert.rejects(() => plane.adminRebindWorkItem(defect.id, { id: "BUG-2", path: "backlog/BUG-C.md", status: "proposed", lifecycleStates: ["proposed"] }, { targetPocSessionId: replacementPoc.sessionId, reason: "recover orphan", evidenceReferences: ["incident:42"] }, adminSessionId), /already authoritative for defect/i);
+  await assert.rejects(() => plane.adminRebindWorkItem(defect.id, { id: "", path: "", status: "", lifecycleStates: [] }, { targetPocSessionId: replacementPoc.sessionId, reason: "recover orphan", evidenceReferences: ["incident:42"] }, adminSessionId), /id, path, status, and configured lifecycleStates are required/i);
+  await assert.rejects(() => plane.adminRebindWorkItem(defect.id, { id: "BUG-2", path: "backlog/BUG-2.md", status: "proposed", lifecycleStates: ["proposed"] }, { targetPocSessionId: "inactive", reason: "recover orphan", evidenceReferences: ["incident:42"] }, adminSessionId), /not the active Manager/i);
+  const rebound = await plane.adminRebindWorkItem(defect.id, { id: "BUG-2", path: "backlog/BUG-2.md", status: "proposed", lifecycleStates: ["proposed", "closed"] }, { targetPocSessionId: replacementPoc.sessionId, reason: "recover orphan", evidenceReferences: ["incident:42"] }, adminSessionId);
+  assert.equal(rebound.workItem.id, "BUG-2");
+  assert.equal(rebound.pocAssignment.sessionId, replacementPoc.sessionId);
+  assert.equal(rebound.intake.targetPocSessionId, poc.sessionId, "original intake remains immutable");
+  assert.equal(rebound.workItemHistory[0].previousWorkItem.id, "BUG-1");
+  const activePocReassigned = await plane.reassignWorkItem(defect.id, { id: "BUG-2A", path: "backlog/BUG-2A.md", status: "proposed", lifecycleStates: ["proposed", "closed"] }, { reason: "active POC follow-up", evidenceReferences: ["incident:42"] }, replacementPoc.sessionId);
+  assert.equal(activePocReassigned.workItem.id, "BUG-2A");
+
+  const superseded = await plane.supersedeWorkItem(defect.id, { id: "BUG-3", path: "backlog/BUG-3.md", status: "proposed", lifecycleStates: ["proposed", "closed"] }, { reason: "replacement is obsolete", evidenceReferences: ["incident:43"] }, adminSessionId);
+  assert.equal(superseded.workItem.id, "BUG-3");
+  assert.equal(superseded.workItemHistory[2].previousWorkItem.id, "BUG-2A");
+  assert.equal(superseded.workItemHistory[2].successorWorkItem.id, "BUG-3");
+  const lookup = await plane.adminLookup(adminSessionId);
+  assert.equal(lookup.assignments.find(item => item.defectId === defect.id).orphaned, false);
+  assert.equal(lookup.defects.find(item => item.id === defect.id).workItemHistory.length, 3);
+});
+
 test("requester-message categories reject noise and record accepted message evidence", async () => {
   const { statePath } = await setup();
   const plane = new TriageControlPlane({ statePath });

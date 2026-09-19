@@ -7,6 +7,10 @@ import { TriageControlPlane, type PocListEntry, type RequesterMessageCategory } 
 
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const STATE_PATH = join(AGENT_DIR, "triage-control-plane", "state.json");
+/** Explicit bootstrap allowlist; Manager registration never grants administrative authority. */
+function bootstrapAdminSessionIds(): string[] {
+  return (process.env.TTR_ADMIN_SESSION_IDS ?? "").split(",").map(value => value.trim()).filter(Boolean);
+}
 const REQUESTER_CATEGORIES = [
   "request-reproduction", "request-logs", "request-access", "request-decision", "request-authority", "mitigation", "stop-change", "safe-to-proceed",
 ] as const;
@@ -16,6 +20,7 @@ const TTR_SUBCOMMANDS = [
   { value: "list", label: "list", description: "Render Managers, aliases, and statuses" },
   { value: "unregister", label: "unregister", description: "Remove a domain or an entire Manager" },
   { value: "deactivate", label: "deactivate", description: "Deactivate a domain's Manager" },
+  { value: "admins", label: "admins", description: "List explicitly enrolled TTR admins" },
   { value: "autoname", label: "autoname", description: "Opt in to guarded TTR session naming" },
 ] as const;
 
@@ -136,6 +141,7 @@ export default function triageControlPlane(pi: ExtensionAPI) {
   const plane = new TriageControlPlane({
     statePath: STATE_PATH,
     git: async () => ({ clean: false }), // Tool calls override this with the actual cwd-aware inspector below.
+    bootstrapAdminSessionIds: bootstrapAdminSessionIds(),
   });
   const syncSessionName = async (ctx: ExtensionContext, force = false): Promise<boolean> => {
     const sessionId = currentSessionId(ctx);
@@ -162,7 +168,7 @@ export default function triageControlPlane(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("ttr", {
-    description: "TTR control plane: register, status, list, unregister, deactivate, or autoname. Domains default to the current repository name.",
+    description: "TTR control plane: register, status, list, unregister, explicit admin lookup, deactivate, or autoname. Domains default to the current repository name.",
     getArgumentCompletions: ttrArgumentCompletions,
     handler: async (args, ctx) => {
       const [subcommand = "", ...rest] = (args || "").trim().split(/\s+/).filter(Boolean);
@@ -178,6 +184,11 @@ export default function triageControlPlane(pi: ExtensionAPI) {
         }
         await syncSessionName(ctx);
         ctx.ui.notify(`TTR Manager registered: ${records.map(record => record.domain).join(", ")} → ${records[0]!.sessionId}`, "info");
+        return;
+      }
+      if (subcommand === "admins") {
+        if (subcommandArgs) throw new Error("Usage: /ttr admins");
+        ctx.ui.notify(JSON.stringify(await plane.listAdmins(currentSessionId(ctx)), null, 2), "info");
         return;
       }
       if (subcommand === "autoname") {
@@ -221,7 +232,7 @@ export default function triageControlPlane(pi: ExtensionAPI) {
         await syncSessionName(ctx);
         return;
       }
-      throw new Error("Usage: /ttr <register|status|list|unregister|deactivate|autoname> [domain]");
+      throw new Error("Usage: /ttr <register|status|list|unregister|deactivate|admins|autoname> [domain]");
     },
   });
 
@@ -265,6 +276,35 @@ export default function triageControlPlane(pi: ExtensionAPI) {
     parameters: Type.Object({ defectId: Type.String(), workItemId: Type.String(), workItemPath: Type.String(), status: Type.String(), lifecycleStates: Type.Array(Type.String()), adapter: Type.Optional(Type.String()), reason: Type.String(), evidenceReferences: Type.Array(Type.String(), { minItems: 1 }) }),
     async execute(_id, params, _signal, _update, ctx) {
       return json(await plane.reassignWorkItem(params.defectId, { id: params.workItemId, path: params.workItemPath, status: params.status, lifecycleStates: params.lifecycleStates, adapter: params.adapter }, { reason: params.reason, evidenceReferences: params.evidenceReferences }, currentSessionId(ctx)));
+    },
+  });
+  pi.registerTool({
+    name: "ttr_register_admin", label: "Register TTR Admin", description: "Enroll an explicit TTR admin. The first admin must be named in TTR_ADMIN_SESSION_IDS; later enrollment requires an active admin.",
+    parameters: Type.Object({ sessionId: Type.String() }),
+    async execute(_id, params, _signal, _update, ctx) { return json(await plane.registerAdmin(params.sessionId, currentSessionId(ctx))); },
+  });
+  pi.registerTool({
+    name: "ttr_admin_lookup", label: "TTR Admin Lookup", description: "Inspect all defects, Managers, assignment histories, and computed orphan state. Requires explicit active-admin authority.",
+    parameters: Type.Object({}),
+    async execute(_id, _params, _signal, _update, ctx) { return json(await plane.adminLookup(currentSessionId(ctx))); },
+  });
+  pi.registerTool({
+    name: "ttr_mark_poc_assignment_orphaned", label: "Mark Manager Assignment Orphaned", description: "An active TTR admin marks one defect Manager assignment orphaned with required reason and evidence; original ownership history remains retained.",
+    parameters: Type.Object({ defectId: Type.String(), reason: Type.String(), evidenceReferences: Type.Array(Type.String(), { minItems: 1 }) }),
+    async execute(_id, params, _signal, _update, ctx) { return json(await plane.markPocAssignmentOrphaned(params.defectId, { reason: params.reason, evidenceReferences: params.evidenceReferences }, currentSessionId(ctx))); },
+  });
+  pi.registerTool({
+    name: "ttr_admin_rebind_work_item", label: "Admin Rebind Authoritative Work Item", description: "An active TTR admin rebinds a defect to a replacement work item at its explicit path and the active Manager session for that domain; ID, path, lifecycle, and collisions are validated.",
+    parameters: Type.Object({ defectId: Type.String(), targetPocSessionId: Type.String(), workItemId: Type.String(), workItemPath: Type.String(), status: Type.String(), lifecycleStates: Type.Array(Type.String()), adapter: Type.Optional(Type.String()), reason: Type.String(), evidenceReferences: Type.Array(Type.String(), { minItems: 1 }) }),
+    async execute(_id, params, _signal, _update, ctx) {
+      return json(await plane.adminRebindWorkItem(params.defectId, { id: params.workItemId, path: params.workItemPath, status: params.status, lifecycleStates: params.lifecycleStates, adapter: params.adapter }, { targetPocSessionId: params.targetPocSessionId, reason: params.reason, evidenceReferences: params.evidenceReferences }, currentSessionId(ctx)));
+    },
+  });
+  pi.registerTool({
+    name: "ttr_supersede_work_item", label: "Supersede Authoritative Work Item", description: "An active TTR admin creates a traceable successor for an obsolete authoritative item without deleting the original audit history.",
+    parameters: Type.Object({ defectId: Type.String(), workItemId: Type.String(), workItemPath: Type.String(), status: Type.String(), lifecycleStates: Type.Array(Type.String()), adapter: Type.Optional(Type.String()), reason: Type.String(), evidenceReferences: Type.Array(Type.String(), { minItems: 1 }) }),
+    async execute(_id, params, _signal, _update, ctx) {
+      return json(await plane.supersedeWorkItem(params.defectId, { id: params.workItemId, path: params.workItemPath, status: params.status, lifecycleStates: params.lifecycleStates, adapter: params.adapter }, { reason: params.reason, evidenceReferences: params.evidenceReferences }, currentSessionId(ctx)));
     },
   });
   pi.registerTool({

@@ -14,6 +14,12 @@ export type RequesterMessageCategory =
   | "stop-change"
   | "safe-to-proceed";
 
+export interface AdminRecord {
+  sessionId: string;
+  registeredAt: string;
+  active: boolean;
+}
+
 export interface PocRecord {
   domain: string;
   /** The first domain in a registration; aliases retain this canonical owner. */
@@ -59,12 +65,32 @@ export interface WorkItemReassignmentAudit {
   reason: string;
   evidenceReferences: string[];
   reassignedAt: string;
+  /** Present only when the prior work item was explicitly superseded. */
+  successorWorkItem?: WorkItem;
+  adminSessionId?: string;
+}
+
+export interface PocAssignment {
+  sessionId: string;
+  status: "active" | "orphaned";
+  assignedAt: string;
+}
+
+export interface PocAssignmentAudit {
+  previousAssignment: PocAssignment;
+  reason: string;
+  evidenceReferences: string[];
+  changedAt: string;
+  adminSessionId: string;
 }
 
 export interface Defect {
   id: string;
   domain: string;
+  /** Current effective Manager; the original recipient remains in intake history. */
   ownerPocSessionId: string;
+  pocAssignment?: PocAssignment;
+  pocAssignmentHistory?: PocAssignmentAudit[];
   intake: {
     reporter: string;
     source: string;
@@ -106,6 +132,8 @@ interface State {
   /** Set after legacy per-alias records have been compacted. */
   pocRegistryVersion?: 2;
   defects: Record<string, Defect>;
+  /** Explicitly enrolled administrative sessions; no Manager role implies this authority. */
+  admins?: Record<string, AdminRecord>;
   /** Opt-in is per Pi session and persisted with the TTR control-plane state. */
   namingOptIns?: Record<string, true>;
 }
@@ -146,7 +174,7 @@ function normalizedDomain(domain: string): string {
 const managerNames = "Avery Blair Cameron Casey Devon Drew Ellis Emery Finley Harper Hayden Jamie Jordan Kendall Lane Logan Morgan Parker Quinn Reese Riley Rowan Sage Sawyer Skyler Taylor Adrian Alex Amari Anderson Angel Ari Ashton Bailey Bellamy Blake Briar Brooklyn Charlie Dakota Dallas Eden Elliott Emerson Frankie Gray Harlow Hunter Indy Jules Kai Keegan Kennedy Lennon Marley Micah Milan Nico Oakley Peyton Phoenix Presley River Rory Remy Sasha Scout Shiloh Sutton Teagan Tatum Wren Aiden Alden Arlo August Bennett Caleb Callum Carter Clark Cole Connor Declan Dominic Elias Ethan Everett Felix Gabriel Gavin George Graham Henry Hudson Isaac Jack Jasper Julian Knox Leo Liam Luca Mason Miles Noah Nolan Oliver Owen Roman Samuel Silas Theo Thomas Victor Wesley Wyatt Zane Ada Alice Amelia Audrey Beatrice Celeste Clara Cora Daphne Eleanor Eliza Eva Florence Grace Hazel Iris Ivy June Lila Lily Luna Maeve Maya Mila Naomi Nora Olive Opal Penelope Phoebe Piper Poppy Ruby Sadie Sofia Stella Thea Violet Willow Zara".split(" ");
 
 function clone<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as T; }
-function defaultState(): State { return { version: 1, registrations: {}, aliases: {}, pocRegistryVersion: 2, defects: {} }; }
+function defaultState(): State { return { version: 1, registrations: {}, aliases: {}, pocRegistryVersion: 2, defects: {}, admins: {} }; }
 
 /** Converts legacy per-alias records into canonical records plus a tiny alias index. */
 function compactPocRegistry(state: State): State {
@@ -175,6 +203,8 @@ export class TriageControlPlane {
     statePath: string;
     now?: () => string;
     git?: GitInspector;
+    /** Explicit bootstrap allowlist for the first persisted admin; never inferred from Manager state. */
+    bootstrapAdminSessionIds?: readonly string[];
     lockTimeoutMs?: number;
     random?: () => number;
   }) {}
@@ -281,6 +311,40 @@ export class TriageControlPlane {
     return this.listPocEntries(state, includeInactive);
   }
 
+  /** Bootstrap authority is an explicit constructor allowlist; subsequent enrollment requires an active admin. */
+  async registerAdmin(sessionId: string, actorSessionId: string): Promise<AdminRecord> {
+    const target = sessionId.trim();
+    const actor = actorSessionId?.trim();
+    if (!target || !actor) throw new Error("admin and actor sessionId are required");
+    return this.transaction((state) => {
+      state.admins ??= {};
+      const bootstrapped = (this.options.bootstrapAdminSessionIds ?? []).includes(target) && actor === target;
+      if (!bootstrapped && !this.isActiveAdmin(state, actor)) {
+        throw new Error("Only an active admin may register an admin; first admin must be explicitly bootstrapped");
+      }
+      const record: AdminRecord = { sessionId: target, registeredAt: this.now(), active: true };
+      state.admins[target] = record;
+      return record;
+    });
+  }
+
+  async deactivateAdmin(sessionId: string, actorSessionId: string): Promise<AdminRecord> {
+    const target = sessionId.trim();
+    return this.transaction((state) => {
+      this.requireAdminAuthority(state, actorSessionId);
+      const admin = state.admins?.[target];
+      if (!admin) throw new Error(`No admin registration for ${target}`);
+      admin.active = false;
+      return admin;
+    });
+  }
+
+  async listAdmins(actorSessionId: string): Promise<AdminRecord[]> {
+    const state = await this.readState();
+    this.requireAdminAuthority(state, actorSessionId);
+    return Object.values(state.admins ?? {}).map(clone);
+  }
+
   async deactivatePoc(domain: string): Promise<PocRecord> {
     const key = normalizedDomain(domain);
     return this.transaction((state) => {
@@ -328,6 +392,8 @@ export class TriageControlPlane {
     const recordedAt = this.now();
     const defect: Defect = {
       id, domain, ownerPocSessionId: poc?.sessionId ?? "unassigned",
+      ...(poc ? { pocAssignment: { sessionId: poc.sessionId, status: "active" as const, assignedAt: recordedAt } } : {}),
+      pocAssignmentHistory: [],
       intake: { reporter: input.reporter, source: input.source, sourceDomain, targetPocSessionId, authorityConfirmed, symptom: input.symptom, impact: input.impact, environment: input.environment, reproduction: input.reproduction, evidenceReferences: [...input.evidenceReferences], recordedAt },
       evidence: input.evidenceReferences.map(path => ({ id: randomUUID(), type: "intake", path, createdAt: recordedAt, status: "recorded" })),
       workItemHistory: [],
@@ -424,6 +490,72 @@ export class TriageControlPlane {
       });
       defect.workItem = replacement;
       defect.statusHistory.push({ at: this.now(), status: replacement.status, note: "authoritative work item reassigned" });
+      return defect;
+    });
+  }
+
+  async adminLookup(actorSessionId: string): Promise<{ admins: AdminRecord[]; pocs: PocRecord[]; defects: Defect[]; assignments: Array<{ defectId: string; assignment: PocAssignment; orphaned: boolean }> }> {
+    const state = await this.readState();
+    this.requireAdminAuthority(state, actorSessionId);
+    return {
+      admins: Object.values(state.admins ?? {}).map(clone),
+      pocs: Object.values(state.registrations).map(clone),
+      defects: Object.values(state.defects).map(clone),
+      assignments: Object.values(state.defects).map((defect) => {
+        const assignment = this.pocAssignment(defect);
+        const activePoc = this.findPoc(state, defect.domain);
+        return { defectId: defect.id, assignment: clone(assignment), orphaned: assignment.status === "orphaned" || !activePoc?.active || activePoc.sessionId !== assignment.sessionId };
+      }),
+    };
+  }
+
+  async markPocAssignmentOrphaned(defectId: string, audit: { reason: string; evidenceReferences: string[] }, actorSessionId: string): Promise<Defect> {
+    return this.transaction((state) => {
+      this.requireAdminAuthority(state, actorSessionId);
+      const defect = this.requireDefect(state, defectId);
+      const previousAssignment = this.pocAssignment(defect);
+      this.requireAudit(audit, "orphaning");
+      if (previousAssignment.status === "orphaned") throw new Error(`Manager assignment for defect ${defectId} is already orphaned`);
+      (defect.pocAssignmentHistory ??= []).push({ previousAssignment: clone(previousAssignment), reason: audit.reason.trim(), evidenceReferences: [...audit.evidenceReferences], changedAt: this.now(), adminSessionId: actorSessionId });
+      defect.pocAssignment = { ...previousAssignment, status: "orphaned" };
+      defect.statusHistory.push({ at: this.now(), status: "manager-assignment-orphaned", note: `admin marked Manager assignment orphaned: ${audit.reason.trim()}` });
+      return defect;
+    });
+  }
+
+  async adminRebindWorkItem(defectId: string, workItem: Omit<WorkItem, "adapter"> & { adapter?: string }, input: { targetPocSessionId: string; reason: string; evidenceReferences: string[] }, actorSessionId: string): Promise<Defect> {
+    return this.transaction((state) => {
+      this.requireAdminAuthority(state, actorSessionId);
+      const defect = this.requireDefect(state, defectId);
+      const previousWorkItem = this.requireWorkItem(defect);
+      const replacement = this.validateWorkItem(workItem);
+      this.requireAudit(input, "rebinding");
+      this.requireActiveTargetPoc(state, defect, input.targetPocSessionId);
+      if (previousWorkItem.id === replacement.id || previousWorkItem.path === replacement.path) throw new Error("replacement work item is the same as the authoritative work item");
+      this.requireNoWorkItemCollision(state, defectId, replacement);
+      const previousAssignment = this.pocAssignment(defect);
+      (defect.workItemHistory ??= []).push({ previousWorkItem: clone(previousWorkItem), reason: input.reason.trim(), evidenceReferences: [...input.evidenceReferences], reassignedAt: this.now(), adminSessionId: actorSessionId });
+      (defect.pocAssignmentHistory ??= []).push({ previousAssignment: clone(previousAssignment), reason: input.reason.trim(), evidenceReferences: [...input.evidenceReferences], changedAt: this.now(), adminSessionId: actorSessionId });
+      defect.workItem = replacement;
+      defect.ownerPocSessionId = input.targetPocSessionId.trim();
+      defect.pocAssignment = { sessionId: input.targetPocSessionId.trim(), status: "active", assignedAt: this.now() };
+      defect.statusHistory.push({ at: this.now(), status: replacement.status, note: "admin authoritative work item rebound" });
+      return defect;
+    });
+  }
+
+  async supersedeWorkItem(defectId: string, workItem: Omit<WorkItem, "adapter"> & { adapter?: string }, audit: { reason: string; evidenceReferences: string[] }, actorSessionId: string): Promise<Defect> {
+    return this.transaction((state) => {
+      this.requireAdminAuthority(state, actorSessionId);
+      const defect = this.requireDefect(state, defectId);
+      const previousWorkItem = this.requireWorkItem(defect);
+      const successor = this.validateWorkItem(workItem);
+      this.requireAudit(audit, "supersession");
+      if (previousWorkItem.id === successor.id || previousWorkItem.path === successor.path) throw new Error("successor work item is the same as the authoritative work item");
+      this.requireNoWorkItemCollision(state, defectId, successor);
+      (defect.workItemHistory ??= []).push({ previousWorkItem: clone(previousWorkItem), successorWorkItem: clone(successor), reason: audit.reason.trim(), evidenceReferences: [...audit.evidenceReferences], reassignedAt: this.now(), adminSessionId: actorSessionId });
+      defect.workItem = successor;
+      defect.statusHistory.push({ at: this.now(), status: successor.status, note: "authoritative work item superseded by admin" });
       return defect;
     });
   }
@@ -536,6 +668,24 @@ export class TriageControlPlane {
   private findPoc(state: State, domain: string): PocRecord | undefined {
     return state.registrations[state.aliases?.[domain] ?? domain];
   }
+  private isActiveAdmin(state: State, sessionId: string): boolean { return state.admins?.[sessionId]?.active === true; }
+  private requireAdminAuthority(state: State, actorSessionId: string): void {
+    if (!actorSessionId?.trim() || !this.isActiveAdmin(state, actorSessionId.trim())) throw new Error("Session is not an explicitly enrolled active TTR admin");
+  }
+  private pocAssignment(defect: Defect): PocAssignment {
+    return defect.pocAssignment ?? { sessionId: defect.ownerPocSessionId, status: "active", assignedAt: defect.intake.recordedAt };
+  }
+  private requireAudit(audit: { reason: string; evidenceReferences: string[] }, action: string): void {
+    if (!audit.reason?.trim() || !Array.isArray(audit.evidenceReferences) || audit.evidenceReferences.length === 0 || audit.evidenceReferences.some(reference => !reference.trim())) {
+      throw new Error(`${action} reason and evidence references are required`);
+    }
+  }
+  private requireActiveTargetPoc(state: State, defect: Defect, sessionId: string): void {
+    const target = sessionId?.trim();
+    const poc = this.findPoc(state, defect.domain);
+    if (!target || !poc?.active || poc.sessionId !== target) throw new Error(`Target session is not the active Manager for defect domain ${defect.domain}`);
+  }
+
   private validateWorkItem(workItem: Omit<WorkItem, "adapter"> & { adapter?: string }): WorkItem {
     if (!workItem.id?.trim() || !workItem.path?.trim() || !workItem.status?.trim() || !Array.isArray(workItem.lifecycleStates) || workItem.lifecycleStates.length === 0 || workItem.lifecycleStates.some(status => !status.trim())) {
       throw new Error("work-item id, path, status, and configured lifecycleStates are required");
@@ -551,7 +701,9 @@ export class TriageControlPlane {
   private requirePocAuthority(state: State, defectId: string, actorSessionId: string, action = "assign"): Defect {
     const defect = this.requireDefect(state, defectId);
     const activePoc = this.findPoc(state, defect.domain);
-    if (!defect.intake.authorityConfirmed || defect.ownerPocSessionId !== actorSessionId || defect.intake.targetPocSessionId !== actorSessionId || !activePoc?.active || activePoc.sessionId !== actorSessionId) {
+    const assignment = this.pocAssignment(defect);
+    const originalAuthorityOrAdminRebind = defect.intake.targetPocSessionId === actorSessionId || defect.pocAssignmentHistory?.some(item => item.adminSessionId && assignment.sessionId === actorSessionId);
+    if (!defect.intake.authorityConfirmed || assignment.status !== "active" || assignment.sessionId !== actorSessionId || defect.ownerPocSessionId !== actorSessionId || !originalAuthorityOrAdminRebind || !activePoc?.active || activePoc.sessionId !== actorSessionId) {
       throw new Error(`Session is not authorized to ${action} a work item for defect ${defectId}`);
     }
     return defect;

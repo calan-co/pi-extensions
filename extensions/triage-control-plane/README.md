@@ -40,6 +40,7 @@ flowchart TD
 
 - Durable global state: `$PI_CODING_AGENT_DIR/triage-control-plane/state.json` (default `~/.pi/agent/triage-control-plane/state.json`), written through an exclusive lock plus atomic temp-file rename with restrictive permissions.
 - Manager session IDs come from `ctx.sessionManager.getSessionId()` (the documented session API); `/ttr register` never guesses one.
+- **Admin authority is separate from Manager authority.** Bootstrap the first admin by setting `TTR_ADMIN_SESSION_IDS` to a comma-separated explicit session-ID allowlist before loading TTR, then call `ttr_register_admin`. An enrolled active admin may enroll or deactivate later admins. A Manager registration, domain, repository path, or intake report never grants admin authority.
 - Pi provides `ctx.cwd`, but no semantic domain API. When omitted from a TTR command, the domain is deterministically derived from the Git repository root name, falling back to the current directory name; supply a domain explicitly to override it.
 - Incoming `ttr_intake` reports must separately declare `sourceDomain`, `ownerDomain`, and `targetPocSessionId` (the retained compatibility field name for the target Manager). `ttr_intake_for_owner` keeps `sourceDomain` and `ownerDomain` explicit but atomically resolves the active target Manager. Neither tool infers ownership from the sender workspace or source domain.
 - Secrets are not accepted in records or tools. Store only evidence references/paths, receipts, and commit SHA evidence.
@@ -54,6 +55,7 @@ Enforced by supported TTR tools:
 - `ttr_prepare_work_lane` refuses to produce a supported diagnosis/review/validation/implementation lane contract until the authoritative work item exists, and its emitted preamble must be passed to the lane;
 - exactly one authoritative work-item reference per TTR defect, and only its configured lifecycle states;
 - reassignment only by the active, addressed owner Manager, with a nonempty replacement ID/path/status/lifecycle, no same or colliding assignment, and append-only prior-item audit history containing a reason and evidence references;
+- active, explicitly enrolled admins may inspect Managers, defects, assignment history, and computed orphan state; mark one Manager assignment orphaned only with reason/evidence; rebind it only to the active Manager session for its domain and an explicit validated work-item path; and supersede an obsolete item with a traceable successor while retaining the original;
 - requester-message category validation and evidence recording;
 - release-gate checks for authoritative item, clean Git tree, commit/validation/review evidence, deployment artifact/receipt/verification, final post-deployment item update, and linked **distinct** second commit evidence;
 - `safe-to-proceed` only after the supported gate passes.
@@ -88,6 +90,7 @@ Do not substitute a name, fabricate a target, or silently reroute an unreachable
 /ttr status payments
 /ttr list                                                # table: all friendly Managers, domains, aliases, and statuses
 /ttr list --active                                       # table: active Managers only
+/ttr admins                                              # requires explicitly enrolled active admin authority
 /ttr unregister payments                                 # remove one domain; promotes another alias if needed
 /ttr unregister payments --all                           # remove the entire Manager and every domain alias
 /ttr deactivate                                          # temporarily stop routing while retaining the Manager record
@@ -134,6 +137,15 @@ ttr_reassign_work_item({
   reason: "duplicate tracker item", evidenceReferences: ["ticket:123"]
 })
 
+// Active TTR admins only. The first enrollment requires this session ID to be explicitly listed in TTR_ADMIN_SESSION_IDS.
+ttr_register_admin({ sessionId: "<admin-session-id>" })
+ttr_admin_lookup({})
+ttr_mark_poc_assignment_orphaned({ defectId: "ttr-…", reason: "original Manager session deleted", evidenceReferences: ["incident:42"] })
+// The target must be the active registered Manager for the defect domain; the work-item path is always explicit.
+ttr_admin_rebind_work_item({ defectId: "ttr-…", targetPocSessionId: "<replacement-manager-session-id>", workItemId: "BUG-789", workItemPath: "backlog/BUG-789.md", status: "proposed", lifecycleStates: ["proposed", "in-progress", "closed"], reason: "recover orphan", evidenceReferences: ["incident:42"] })
+// Supersession retains both the obsolete item and named successor in immutable audit history.
+ttr_supersede_work_item({ defectId: "ttr-…", workItemId: "BUG-790", workItemPath: "backlog/BUG-790.md", status: "proposed", lifecycleStates: ["proposed", "closed"], reason: "BUG-789 obsolete", evidenceReferences: ["incident:43"] })
+
 // Required supported-lane preamble to pass into any diagnosis/review/validation/implementation lane:
 ttr_prepare_work_lane({ defectId: "ttr-…", lane: "diagnosis" })
 
@@ -169,5 +181,5 @@ pi -e extensions/triage-control-plane/index.ts
 
 ```bash
 cd /path/to/pi-extensions
-node --import tsx --test test/triage-control-plane.test.mjs test/triage-control-plane-core.test.mjs
+node --import tsx --test test/triage-control-plane.test.mjs test/triage-control-plane-core.test.mjs test/triage-control-plane-commands.test.mjs
 ```

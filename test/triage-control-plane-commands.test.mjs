@@ -50,6 +50,10 @@ const { api, appendedEntries, commands, tools, notifications, sessionNames, cont
 
   assert.ok(tools.has("ttr_reassign_work_item"));
   assert.ok(tools.has("ttr_intake_for_owner"));
+  assert.ok(tools.has("ttr_admin_lookup"));
+  assert.ok(tools.has("ttr_mark_poc_assignment_orphaned"));
+  assert.ok(tools.has("ttr_admin_rebind_work_item"));
+  assert.ok(tools.has("ttr_supersede_work_item"));
   await commands.get("ttr").handler("register pi-extensions ttr agent-workflows handoff", context);
   await commands.get("ttr").handler("manager handoff", context);
 
@@ -127,7 +131,7 @@ test("/ttr consolidates POC commands and derives an omitted domain from the repo
 
   assert.deepEqual([...commands.keys()], ["ttr"]);
   const complete = commands.get("ttr").getArgumentCompletions;
-  assert.deepEqual(complete("").map(({ value }) => value), ["register", "status", "list", "unregister", "deactivate", "autoname"]);
+  assert.deepEqual(complete("").map(({ value }) => value), ["register", "status", "list", "unregister", "deactivate", "admins", "autoname"]);
   assert.deepEqual(complete("st").map(({ value }) => value), ["status"]);
   assert.deepEqual(complete("register ").map(({ value }) => value), ["--replace", "--session-id"]);
   assert.deepEqual(complete("list ").map(({ value }) => value), ["--active"]);
