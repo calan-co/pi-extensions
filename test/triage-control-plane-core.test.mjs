@@ -69,6 +69,24 @@ test("lead and contributor work items are scoped, globally collision-safe, and a
   await assert.rejects(() => plane.assignWorkItem(other.id, "payments", item("PAY-1", "other.md"), "payments-manager"), /already authoritative/i);
 });
 
+test("an admin moves the lead work-item scope to the transferred coordinator without copying it", async () => {
+  const { statePath } = await setup();
+  const plane = new TriageControlPlane({ statePath, bootstrapAdminSessionIds: ["admin"] });
+  await plane.registerPoc("payments", { sessionId: "payments-manager" }, false);
+  await plane.registerPoc("homelab-ansible", { sessionId: "ansible-manager" }, false);
+  await plane.registerAdmin("admin", "admin");
+  const { defect } = await plane.intakeForOwner(intake());
+  await plane.assignWorkItem(defect.id, "payments", item("PAY-1", "pay.md"), "payments-manager");
+  await plane.transferCoordinator(defect.id, "homelab-ansible", "decision:coordinator", "admin");
+
+  const moved = await plane.transferLeadWorkItemDomain(defect.id, "homelab-ansible", "decision:move-lead", "admin");
+  assert.equal(moved.leadWorkItemDomain, "homelab-ansible");
+  assert.equal(moved.workItems["homelab-ansible"].id, "PAY-1");
+  assert.equal(moved.workItems.payments, undefined);
+  assert.equal(moved.audit.at(-1).action, "lead-work-item-domain-transferred");
+  await plane.transitionWorkItem(defect.id, "homelab-ansible", "in-progress", {}, "ansible-manager");
+});
+
 test("release evidence and gate are limited to the lead work item", async () => {
   const { statePath } = await setup();
   const plane = new TriageControlPlane({ statePath, git: async () => ({ clean: true, head: "pre" }) });

@@ -9,7 +9,7 @@ Each defect contains:
 - immutable `report` provenance: reporter, source, optional `sourceDomain`, symptom, impact, environment, reproduction, evidence references, and recorded time;
 - one mutable `coordinatorDomain`, whose active Manager is always resolved from the registry at the time of an operation (no copied owner session is stored);
 - zero or more normalized `contributingDomains`;
-- domain-keyed `workItems`: the first coordinator-domain item is the single stable lead canonical reference; later contributor or transferred-coordinator items are non-lead references; and
+- domain-keyed `workItems`: one lead canonical reference and later contributor references; an active admin may explicitly move the lead reference to a transferred coordinator domain; and
 - an append-only `audit` event list. Every event has time, actor session when applicable, action, changed values/identifiers, and one decision reference.
 
 The built-in `explicit-lifecycle` adapter retains the supplied work-item ID, path, and lifecycle. **It does not synchronize an external tracker.**
@@ -21,7 +21,7 @@ A v1 record is converted under the existing atomic transaction lock and persiste
 - Manager sessions come only from `ctx.sessionManager.getSessionId()`.
 - The active Manager registered for `coordinatorDomain` authorizes all work-item transitions and evidence writes. Replacing or deactivating that Manager changes authority dynamically without changing report provenance.
 - Explicit active TTR admins (bootstrapped through `TTR_ADMIN_SESSION_IDS`) alone can transfer a coordinator. Transfer validates the target domain has an active Manager, changes only `coordinatorDomain`, and appends audit.
-- A contributor may be added or removed only by the coordinator. Any non-lead work-item reference, including one assigned to a transferred coordinator domain, may be removed by that coordinator with an audited decision; the stable lead cannot be removed.
+- A contributor may be added or removed only by the coordinator. Any non-lead work-item reference may be removed by that coordinator with an audited decision; the lead cannot be removed, but an active admin may explicitly move it to the coordinator domain.
 - Work-item IDs and paths are globally collision-checked across all defect scopes.
 - Validation, review, commit, deployment, and requester-message evidence require `workItemDomain`. Release gates use only the lead work-item scope; contributor evidence never satisfies a lead release gate.
 - The supported release gate still requires a lead item, clean tree, validation/review/commit evidence, and (when required) deployment evidence, a final lead transition, and a distinct final post-deployment commit.
@@ -65,10 +65,14 @@ ttr_assign_work_item({
 // Any non-lead reference may be removed only by the coordinator, with an auditable decision.
 ttr_remove_contributor_work_item({ defectId: "ttr-…", workItemDomain: "operations", decisionReference: "decision:no-longer-needed" })
 
-// Admin only; report and workItems remain unchanged. The original lead stays stable.
+// Admin only; coordinator transfer leaves the lead reference unchanged.
 ttr_transfer_coordinator({ defectId: "ttr-…", targetDomain: "risk", decisionReference: "decision:42" })
-ttr_assign_work_item({ defectId: "ttr-…", workItemDomain: "risk", workItemId: "RISK-1", workItemPath: "risk/RISK-1.md", status: "proposed", lifecycleStates: ["proposed", "closed"] })
-ttr_remove_contributor_work_item({ defectId: "ttr-…", workItemDomain: "risk", decisionReference: "decision:remove-risk-reference" })
+// Use this only when the existing lead tracker belongs to the new coordinator domain.
+// It moves the reference; it does not replace a tracker or create a domain alias.
+ttr_transfer_lead_work_item_domain({ defectId: "ttr-…", targetDomain: "risk", decisionReference: "decision:move-lead" })
+ttr_add_contributing_domains({ defectId: "ttr-…", domains: ["operations"] })
+ttr_assign_work_item({ defectId: "ttr-…", workItemDomain: "operations", workItemId: "OPS-1", workItemPath: "ops/OPS-1.md", status: "proposed", lifecycleStates: ["proposed", "closed"] })
+ttr_remove_contributor_work_item({ defectId: "ttr-…", workItemDomain: "operations", decisionReference: "decision:remove-operations-reference" })
 
 ttr_record_evidence({ defectId: "ttr-…", workItemDomain: "payments", type: "validation", status: "passed", path: "evidence/test.txt" })
 ttr_record_evidence({ defectId: "ttr-…", workItemDomain: "payments", type: "review", status: "passed", path: "evidence/review.md" })
