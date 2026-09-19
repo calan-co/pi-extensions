@@ -152,6 +152,14 @@ ttr_supersede_work_item({ defectId: "ttr-…", workItemId: "BUG-790", workItemPa
 
 Use the admin tools—not direct edits to `state.json`—to repair routing records. They append audit history; they never delete the original defect or work-item record.
 
+**Create an admin session:** Admin is not implied by Manager registration. For the **first** admin only, obtain that session's full Pi session ID (for example, `echo "$PI_INTERCOM_SESSION_ID"` where available), start/reload Pi with `TTR_ADMIN_SESSION_IDS=<that-full-id>`, then from that same session invoke:
+
+```ts
+ttr_register_admin({ sessionId: "<that-full-id>" })
+```
+
+After one active admin exists, do not use the bootstrap allowlist: an existing active admin invokes `ttr_register_admin({ sessionId: "<new-full-id>" })` to enroll another session. The first bootstrap call fails unless the admin registry is empty, the ID is allowlisted, and caller/target are identical. Never copy or edit `state.json` to bootstrap an admin.
+
 **Orphaned Manager/session:** first inspect the defect and its computed assignment state, then mark the assignment orphaned with the incident reference. Rebinding deliberately fails until this explicit orphan step has happened.
 
 ```ts
