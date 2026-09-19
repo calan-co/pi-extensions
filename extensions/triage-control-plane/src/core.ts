@@ -21,9 +21,13 @@ export interface PocRecord {
   sessionId: string;
   projectBoundary?: string;
   requesterChannel?: string;
+  /** Friendly name assigned once to the Manager's Pi session. */
+  managerName?: string;
   registeredAt: string;
   active: boolean;
 }
+
+export interface PocListEntry extends PocRecord { aliases: string[] }
 
 export interface Evidence {
   id: string;
@@ -95,7 +99,12 @@ export interface WorkItemAdapter {
 
 interface State {
   version: 1;
+  /** Canonical POC records, keyed by canonical domain. */
   registrations: Record<string, PocRecord>;
+  /** Every lookup domain, including canonical domains, mapped to its canonical record. */
+  aliases?: Record<string, string>;
+  /** Set after legacy per-alias records have been compacted. */
+  pocRegistryVersion?: 2;
   defects: Record<string, Defect>;
   /** Opt-in is per Pi session and persisted with the TTR control-plane state. */
   namingOptIns?: Record<string, true>;
@@ -118,6 +127,9 @@ export interface IntakeInput {
   currentSessionId: string;
 }
 
+export type OwnerResolvedIntakeInput = Omit<IntakeInput, "targetPocSessionId">;
+type IntakeResult = { defect: Defect; role: "poc" | "non-poc" | "unassigned"; handoff?: { targetSessionId: string; delivery: "not-attempted"; payload: Record<string, unknown> } };
+
 interface GitSnapshot { clean: boolean; head?: string }
 type GitInspector = () => Promise<GitSnapshot>;
 
@@ -131,8 +143,31 @@ function normalizedDomain(domain: string): string {
   return value;
 }
 
+const managerNames = "Avery Blair Cameron Casey Devon Drew Ellis Emery Finley Harper Hayden Jamie Jordan Kendall Lane Logan Morgan Parker Quinn Reese Riley Rowan Sage Sawyer Skyler Taylor Adrian Alex Amari Anderson Angel Ari Ashton Bailey Bellamy Blake Briar Brooklyn Charlie Dakota Dallas Eden Elliott Emerson Frankie Gray Harlow Hunter Indy Jules Kai Keegan Kennedy Lennon Marley Micah Milan Nico Oakley Peyton Phoenix Presley River Rory Remy Sasha Scout Shiloh Sutton Teagan Tatum Wren Aiden Alden Arlo August Bennett Caleb Callum Carter Clark Cole Connor Declan Dominic Elias Ethan Everett Felix Gabriel Gavin George Graham Henry Hudson Isaac Jack Jasper Julian Knox Leo Liam Luca Mason Miles Noah Nolan Oliver Owen Roman Samuel Silas Theo Thomas Victor Wesley Wyatt Zane Ada Alice Amelia Audrey Beatrice Celeste Clara Cora Daphne Eleanor Eliza Eva Florence Grace Hazel Iris Ivy June Lila Lily Luna Maeve Maya Mila Naomi Nora Olive Opal Penelope Phoebe Piper Poppy Ruby Sadie Sofia Stella Thea Violet Willow Zara".split(" ");
+
 function clone<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as T; }
-function defaultState(): State { return { version: 1, registrations: {}, defects: {} }; }
+function defaultState(): State { return { version: 1, registrations: {}, aliases: {}, pocRegistryVersion: 2, defects: {} }; }
+
+/** Converts legacy per-alias records into canonical records plus a tiny alias index. */
+function compactPocRegistry(state: State): State {
+  if (state.pocRegistryVersion === 2) return state;
+  const registrations: Record<string, PocRecord> = {};
+  const aliases: Record<string, string> = {};
+  const canonicalByIdentity = new Map<string, string>();
+  const canonicalFor = (key: string, record: PocRecord): string => {
+    const identity = JSON.stringify([record.sessionId, record.active]);
+    const canonical = canonicalByIdentity.get(identity) ?? key;
+    canonicalByIdentity.set(identity, canonical);
+    registrations[canonical] ??= { ...record, domain: canonical, canonicalDomain: canonical };
+    return canonical;
+  };
+  for (const [key, record] of Object.entries(state.registrations)) aliases[normalizedDomain(key)] = canonicalFor(normalizedDomain(key), record);
+  for (const [alias, legacyCanonical] of Object.entries(state.aliases ?? {})) {
+    const record = state.registrations[legacyCanonical];
+    if (record) aliases[normalizedDomain(alias)] = canonicalFor(normalizedDomain(legacyCanonical), record);
+  }
+  return { ...state, registrations, aliases, pocRegistryVersion: 2 };
+}
 
 /** Durable, globally-scoped TTR control-plane core. It never transports messages or deploys. */
 export class TriageControlPlane {
@@ -141,6 +176,7 @@ export class TriageControlPlane {
     now?: () => string;
     git?: GitInspector;
     lockTimeoutMs?: number;
+    random?: () => number;
   }) {}
 
   private now(): string { return this.options.now?.() ?? new Date().toISOString(); }
@@ -168,7 +204,7 @@ export class TriageControlPlane {
     try {
       const parsed = JSON.parse(await readFile(this.options.statePath, "utf8")) as State;
       if (parsed.version !== 1 || !parsed.registrations || !parsed.defects) throw new Error("unsupported state schema");
-      return parsed;
+      return compactPocRegistry(parsed);
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return defaultState();
       throw new Error(`Cannot read triage-control-plane state: ${(error as Error).message}`);
@@ -197,23 +233,24 @@ export class TriageControlPlane {
     if (!input.sessionId?.trim()) throw new Error("POC sessionId is required and must come from Pi session APIs/environment");
     return this.transaction((state) => {
       for (const key of keys) {
-        const current = state.registrations[key];
+        const current = this.findPoc(state, key);
         if (current?.active && current.sessionId !== input.sessionId.trim() && !confirmReplacement) {
           throw new Error(`Active POC registration for ${key} exists; explicit replacement confirmation is required`);
         }
       }
+      this.assignMissingManagerNames(state);
+      const canonicalDomain = keys[0]!;
       const registeredAt = this.now();
-      return keys.map((domain) => {
-        const record: PocRecord = { domain, canonicalDomain: keys[0]!, sessionId: input.sessionId.trim(), ...(input.projectBoundary ? { projectBoundary: input.projectBoundary } : {}), ...(input.requesterChannel ? { requesterChannel: input.requesterChannel } : {}), registeredAt, active: true };
-        state.registrations[domain] = record;
-        return record;
-      });
+      const record: PocRecord = { domain: canonicalDomain, canonicalDomain, sessionId: input.sessionId.trim(), managerName: this.managerNameFor(state, input.sessionId.trim()), ...(input.projectBoundary ? { projectBoundary: input.projectBoundary } : {}), ...(input.requesterChannel ? { requesterChannel: input.requesterChannel } : {}), registeredAt, active: true };
+      state.registrations[canonicalDomain] = record;
+      state.aliases ??= {};
+      for (const domain of keys) state.aliases[domain] = canonicalDomain;
+      return keys.map(domain => ({ ...record, domain }));
     });
   }
 
   async resolvePoc(domain: string): Promise<PocRecord | undefined> {
-    const state = await this.readState();
-    const record = state.registrations[normalizedDomain(domain)];
+    const record = this.findPoc(await this.readState(), normalizedDomain(domain));
     return record?.active ? clone(record) : undefined;
   }
 
@@ -233,48 +270,94 @@ export class TriageControlPlane {
     return state.namingOptIns?.[sessionId.trim()] === true;
   }
 
-  async listPocs(includeInactive = false): Promise<PocRecord[]> {
+  async listPocs(includeInactive = false): Promise<PocListEntry[]> {
     const state = await this.readState();
-    return Object.values(state.registrations).filter(item => includeInactive || item.active).map(clone);
+    if (Object.values(state.registrations).some(record => !record.managerName)) {
+      return this.transaction((next) => {
+        this.assignMissingManagerNames(next);
+        return this.listPocEntries(next, includeInactive);
+      });
+    }
+    return this.listPocEntries(state, includeInactive);
   }
 
   async deactivatePoc(domain: string): Promise<PocRecord> {
     const key = normalizedDomain(domain);
     return this.transaction((state) => {
-      const record = state.registrations[key];
-      if (!record) throw new Error(`No POC registration for ${key}`);
+      const record = this.findPoc(state, key);
+      if (!record) throw new Error(`No Manager registration for ${key}`);
       record.active = false;
       return record;
     });
   }
 
-  async intake(input: IntakeInput): Promise<{ defect: Defect; role: "poc" | "non-poc" | "unassigned"; handoff?: { targetSessionId: string; delivery: "not-attempted"; payload: Record<string, unknown> } }> {
+  /** Removes one domain alias, or every domain belonging to its Manager. */
+  async unregisterPoc(domain: string, removeAll = false): Promise<{ removedDomains: string[] }> {
+    const key = normalizedDomain(domain);
+    return this.transaction((state) => {
+      const canonicalDomain = state.aliases?.[key] ?? key;
+      if (!state.registrations[canonicalDomain]) throw new Error(`No Manager registration for ${key}`);
+      const domains = Object.entries(state.aliases ?? {}).filter(([, canonical]) => canonical === canonicalDomain).map(([alias]) => alias).sort();
+      const removedDomains = removeAll ? domains : [key];
+      if (!removeAll && !domains.includes(key)) throw new Error(`No Manager registration for ${key}`);
+      for (const alias of removedDomains) delete state.aliases?.[alias];
+      if (removeAll || domains.length === 1) {
+        delete state.registrations[canonicalDomain];
+        return { removedDomains };
+      }
+      if (key === canonicalDomain) {
+        const replacement = domains.find(alias => alias !== key)!;
+        const record = state.registrations[canonicalDomain]!;
+        delete state.registrations[canonicalDomain];
+        state.registrations[replacement] = { ...record, domain: replacement, canonicalDomain: replacement };
+        for (const [alias, canonical] of Object.entries(state.aliases ?? {})) {
+          if (canonical === canonicalDomain) state.aliases![alias] = replacement;
+        }
+      }
+      return { removedDomains };
+    });
+  }
+
+  private recordIntake(state: State, input: OwnerResolvedIntakeInput, targetPocSessionId: string): IntakeResult {
     const domain = normalizedDomain(input.ownerDomain);
     const sourceDomain = normalizedDomain(input.sourceDomain);
+    const resolvedPoc = this.findPoc(state, domain);
+    const poc = resolvedPoc?.active ? resolvedPoc : undefined;
+    const authorityConfirmed = poc?.sessionId === targetPocSessionId && targetPocSessionId === input.currentSessionId;
+    const id = `ttr-${randomUUID()}`;
+    const recordedAt = this.now();
+    const defect: Defect = {
+      id, domain, ownerPocSessionId: poc?.sessionId ?? "unassigned",
+      intake: { reporter: input.reporter, source: input.source, sourceDomain, targetPocSessionId, authorityConfirmed, symptom: input.symptom, impact: input.impact, environment: input.environment, reproduction: input.reproduction, evidenceReferences: [...input.evidenceReferences], recordedAt },
+      evidence: input.evidenceReferences.map(path => ({ id: randomUUID(), type: "intake", path, createdAt: recordedAt, status: "recorded" })),
+      workItemHistory: [],
+      statusHistory: [],
+    };
+    state.defects[id] = defect;
+    if (!poc) return { defect, role: "unassigned" };
+    if (authorityConfirmed) return { defect, role: "poc" };
+    return {
+      defect, role: "non-poc",
+      handoff: {
+        targetSessionId: poc.sessionId, delivery: "not-attempted",
+        payload: { defectId: id, domain, sourceDomain, symptom: input.symptom, impact: input.impact, evidenceReferences: [...input.evidenceReferences] },
+      },
+    };
+  }
+
+  async intake(input: IntakeInput): Promise<IntakeResult> {
     const targetPocSessionId = input.targetPocSessionId?.trim();
     if (!targetPocSessionId) throw new Error("target POC sessionId is required for an incoming defect report");
+    return this.transaction(state => this.recordIntake(state, input, targetPocSessionId));
+  }
+
+  async intakeForOwner(input: OwnerResolvedIntakeInput): Promise<IntakeResult> {
+    const domain = normalizedDomain(input.ownerDomain);
     return this.transaction((state) => {
-      const poc = state.registrations[domain]?.active ? state.registrations[domain] : undefined;
-      const authorityConfirmed = poc?.sessionId === targetPocSessionId && targetPocSessionId === input.currentSessionId;
-      const id = `ttr-${randomUUID()}`;
-      const recordedAt = this.now();
-      const defect: Defect = {
-        id, domain, ownerPocSessionId: poc?.sessionId ?? "unassigned",
-        intake: { reporter: input.reporter, source: input.source, sourceDomain, targetPocSessionId, authorityConfirmed, symptom: input.symptom, impact: input.impact, environment: input.environment, reproduction: input.reproduction, evidenceReferences: [...input.evidenceReferences], recordedAt },
-        evidence: input.evidenceReferences.map(path => ({ id: randomUUID(), type: "intake", path, createdAt: recordedAt, status: "recorded" })),
-        workItemHistory: [],
-        statusHistory: [],
-      };
-      state.defects[id] = defect;
-      if (!poc) return { defect, role: "unassigned" as const };
-      if (authorityConfirmed) return { defect, role: "poc" as const };
-      return {
-        defect, role: "non-poc" as const,
-        handoff: {
-          targetSessionId: poc.sessionId, delivery: "not-attempted" as const,
-          payload: { defectId: id, domain, sourceDomain, symptom: input.symptom, impact: input.impact, evidenceReferences: [...input.evidenceReferences] },
-        },
-      };
+      const poc = this.findPoc(state, domain);
+      const targetPocSessionId = poc?.active ? poc.sessionId : undefined;
+      if (!targetPocSessionId) throw new Error(`No active POC registration for ${domain}; run /ttr register ${domain}`);
+      return this.recordIntake(state, input, targetPocSessionId);
     });
   }
 
@@ -296,7 +379,7 @@ export class TriageControlPlane {
     return this.transaction((state) => {
       const defect = this.requireDefect(state, defectId);
       if (defect.intake.authorityConfirmed === true) throw new Error(`Defect ${defectId} already has confirmed intake authority`);
-      const poc = state.registrations[domain];
+      const poc = this.findPoc(state, domain);
       if (!poc?.active || poc.sessionId !== input.actorSessionId || targetPocSessionId !== input.actorSessionId) {
         throw new Error(`Session is not authorized to re-attest defect ${defectId} for ${domain}`);
       }
@@ -433,6 +516,26 @@ export class TriageControlPlane {
     return this.recordEvidence(defectId, { type: "requester-message", status: "recorded", category: category as RequesterMessageCategory, message: message.trim(), delivery: "not-delivered" });
   }
 
+  private managerNameFor(state: State, sessionId: string): string {
+    const existing = Object.values(state.registrations).find(record => record.sessionId === sessionId)?.managerName;
+    if (existing) return existing;
+    const taken = new Set(Object.values(state.registrations).map(record => record.managerName).filter(Boolean));
+    const available = managerNames.filter(name => !taken.has(name));
+    if (available.length === 0) throw new Error("No friendly Manager names remain");
+    return available[Math.floor((this.options.random?.() ?? Math.random()) * available.length)]!;
+  }
+  private assignMissingManagerNames(state: State): void {
+    for (const record of Object.values(state.registrations)) record.managerName ??= this.managerNameFor(state, record.sessionId);
+  }
+  private listPocEntries(state: State, includeInactive: boolean): PocListEntry[] {
+    return Object.entries(state.registrations)
+      .filter(([, record]) => includeInactive || record.active)
+      .map(([domain, record]) => ({ ...clone(record), aliases: Object.entries(state.aliases ?? {}).filter(([, canonical]) => canonical === domain).map(([alias]) => alias).sort() }))
+      .sort((left, right) => left.domain.localeCompare(right.domain));
+  }
+  private findPoc(state: State, domain: string): PocRecord | undefined {
+    return state.registrations[state.aliases?.[domain] ?? domain];
+  }
   private validateWorkItem(workItem: Omit<WorkItem, "adapter"> & { adapter?: string }): WorkItem {
     if (!workItem.id?.trim() || !workItem.path?.trim() || !workItem.status?.trim() || !Array.isArray(workItem.lifecycleStates) || workItem.lifecycleStates.length === 0 || workItem.lifecycleStates.some(status => !status.trim())) {
       throw new Error("work-item id, path, status, and configured lifecycleStates are required");
@@ -447,7 +550,7 @@ export class TriageControlPlane {
   private requireDefect(state: State, defectId: string): Defect { const defect = state.defects[defectId]; if (!defect) throw new Error(`Unknown defect: ${defectId}`); return defect; }
   private requirePocAuthority(state: State, defectId: string, actorSessionId: string, action = "assign"): Defect {
     const defect = this.requireDefect(state, defectId);
-    const activePoc = state.registrations[defect.domain];
+    const activePoc = this.findPoc(state, defect.domain);
     if (!defect.intake.authorityConfirmed || defect.ownerPocSessionId !== actorSessionId || defect.intake.targetPocSessionId !== actorSessionId || !activePoc?.active || activePoc.sessionId !== actorSessionId) {
       throw new Error(`Session is not authorized to ${action} a work item for defect ${defectId}`);
     }

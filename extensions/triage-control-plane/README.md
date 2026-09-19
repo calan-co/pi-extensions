@@ -6,7 +6,7 @@ Global Pi extension implementing the structured control-plane portions of `~/.ag
 
 TTR makes the protocol's control plane durable and inspectable without replacing the policy skill or automating unsafe external actions. It answers four control questions before work advances:
 
-1. **Who owns this defect domain?** The active designated POC.
+1. **Who owns this defect domain?** The active designated Manager.
 2. **What is the single tracking authority?** The defect's one authoritative work item.
 3. **What evidence supports the next transition?** Linked intake, validation, review, commit, deployment, and requester-message evidence.
 4. **May a supported release or safe-to-proceed action advance?** Only if the fail-closed release gate passes.
@@ -16,7 +16,7 @@ TTR makes the protocol's control plane durable and inspectable without replacing
 ```mermaid
 flowchart TD
   Skill["bug-report-response skill\nbehavioural protocol"] --> Intake[ttr_intake]
-  Intake --> Registry["POC registry\natomic global state"]
+  Intake --> Registry["Manager registry\natomic global state"]
   Intake --> Defect["Defect record\nowner + intake evidence"]
   Defect --> WorkItem["One authoritative work item\nexplicit lifecycle adapter"]
   WorkItem --> Lane[ttr_prepare_work_lane]
@@ -32,16 +32,16 @@ flowchart TD
 | Component | Responsibility |
 | --- | --- |
 | `index.ts` | Pi command and custom-tool registration; retrieves the supported Pi session ID and performs cwd-aware Git inspection. |
-| `src/core.ts` | Testable domain model, atomic lock/file storage, POC resolution, work-item invariants, evidence recording, and release-gate logic. |
+| `src/core.ts` | Testable domain model, atomic lock/file storage, Manager resolution, work-item invariants, evidence recording, and release-gate logic. |
 | `explicit-lifecycle` adapter | Stores caller-configured repository lifecycle states. It does not infer statuses or edit repository backlog files. |
 | `README.md` | Operational contract, boundaries, installation, and examples. |
 
 ## State and safety
 
 - Durable global state: `$PI_CODING_AGENT_DIR/triage-control-plane/state.json` (default `~/.pi/agent/triage-control-plane/state.json`), written through an exclusive lock plus atomic temp-file rename with restrictive permissions.
-- POC session IDs come from `ctx.sessionManager.getSessionId()` (the documented session API); `/ttr register` never guesses one.
+- Manager session IDs come from `ctx.sessionManager.getSessionId()` (the documented session API); `/ttr register` never guesses one.
 - Pi provides `ctx.cwd`, but no semantic domain API. When omitted from a TTR command, the domain is deterministically derived from the Git repository root name, falling back to the current directory name; supply a domain explicitly to override it.
-- Incoming `ttr_intake` reports must separately declare `sourceDomain`, `ownerDomain`, and `targetPocSessionId`. TTR resolves only `ownerDomain`; it never infers ownership from the sender workspace or source domain.
+- Incoming `ttr_intake` reports must separately declare `sourceDomain`, `ownerDomain`, and `targetPocSessionId` (the retained compatibility field name for the target Manager). `ttr_intake_for_owner` keeps `sourceDomain` and `ownerDomain` explicit but atomically resolves the active target Manager. Neither tool infers ownership from the sender workspace or source domain.
 - Secrets are not accepted in records or tools. Store only evidence references/paths, receipts, and commit SHA evidence.
 - The built-in `explicit-lifecycle` adapter stores the caller-supplied lifecycle states alongside the authoritative ID/path. It intentionally does **not** invent repository status names or mutate a repository work item. A repository integration can implement the exported `WorkItemAdapter` seam.
 
@@ -49,11 +49,11 @@ flowchart TD
 
 Enforced by supported TTR tools:
 
-- one active POC registration per canonical domain or alias, with atomic multi-alias registration and explicit confirmation before active POC replacement;
-- evidence-only handoff generation when the resolved owner POC, declared target POC, and receiving session do not all match;
+- one active Manager registration per canonical domain or alias, with atomic multi-alias registration and explicit confirmation before active Manager replacement; aliases are stored as a compact index to one canonical Manager record, and legacy same-session records are consolidated on read;
+- evidence-only handoff generation when the resolved owner Manager, declared target Manager, and receiving session do not all match;
 - `ttr_prepare_work_lane` refuses to produce a supported diagnosis/review/validation/implementation lane contract until the authoritative work item exists, and its emitted preamble must be passed to the lane;
 - exactly one authoritative work-item reference per TTR defect, and only its configured lifecycle states;
-- reassignment only by the active, addressed owner POC, with a nonempty replacement ID/path/status/lifecycle, no same or colliding assignment, and append-only prior-item audit history containing a reason and evidence references;
+- reassignment only by the active, addressed owner Manager, with a nonempty replacement ID/path/status/lifecycle, no same or colliding assignment, and append-only prior-item audit history containing a reason and evidence references;
 - requester-message category validation and evidence recording;
 - release-gate checks for authoritative item, clean Git tree, commit/validation/review evidence, deployment artifact/receipt/verification, final post-deployment item update, and linked **distinct** second commit evidence;
 - `safe-to-proceed` only after the supported gate passes.
@@ -66,35 +66,38 @@ Not enforceable globally:
 - `ttr_send_requester_message` records a permitted message only. It has **no external transport** and never sends email, chat, comments, deployments, publications, or releases.
 - a clean Git tree and linked SHA evidence prove supported gate prerequisites, but cannot prove that arbitrary hidden/external changes are in scope. Deployment authorization remains human/repository process authority.
 
-### Sender-side non-POC handoff contract
+### Sender-side non-Manager handoff contract
 
-`ttr_intake` returns a `targetSessionId`, `delivery: "not-attempted"`, and the minimal evidence-only payload. If and only if the POC session is a known established reachable channel, use exactly the target emitted by the tool:
+`ttr_intake` returns a `targetSessionId`, `delivery: "not-attempted"`, and the minimal evidence-only payload. If and only if the Manager session is a known established reachable channel, use exactly the target emitted by the tool:
 
 ```ts
 intercom({ action: "send", to: "<returned targetSessionId>", message: "<returned payload JSON>" })
 ```
 
-Do not substitute a name, fabricate a target, or silently reroute an unreachable POC. If reachability is unknown, keep the payload in TTR state and request an authorized replacement route.
+Do not substitute a name, fabricate a target, or silently reroute an unreachable Manager. If reachability is unknown, keep the payload in TTR state and request an authorized replacement route.
 
 ## Commands
 
 ```text
-/ttr register                                            # register this session for the current repository domain
-/ttr register payments                                   # this session is POC for an explicit domain
-/ttr register pi-extensions ttr agent-workflows handoff  # register the same POC for a canonical domain plus aliases
-/ttr register payments --session-id <pi-session-id>      # explicit POC; positional values remain domains/aliases
-/ttr register payments ttr --replace                     # required to replace any active POC in the set
-/ttr poc                                                 # inspect the POC for the current repository domain
-/ttr poc payments
-/ttr pocs
-/ttr deactivate                                          # deactivate the POC for the current repository domain
+/ttr register                                            # register this session as Manager for the current repository domain
+/ttr register payments                                   # this session is Manager for an explicit domain
+/ttr register pi-extensions ttr agent-workflows handoff  # register the same Manager for a canonical domain plus aliases
+/ttr register payments --session-id <pi-session-id>      # explicit Manager; positional values remain domains/aliases
+/ttr register payments ttr --replace                     # required to replace any active Manager in the set
+/ttr manager                                             # inspect the Manager for the current repository domain
+/ttr manager payments
+/ttr managers                                            # JSON: active canonical Managers
+/ttr list                                                # table: friendly Manager name, domains, aliases, and active status
+/ttr unregister payments                                 # remove one domain; promotes another alias if needed
+/ttr unregister payments --all                           # remove the entire Manager and every domain alias
+/ttr deactivate                                          # deactivate the Manager for the current repository domain
 /ttr deactivate payments
 ```
 
 ## Tool examples
 
 ```ts
-// Record intake. `sourceDomain` is evidence context; only `ownerDomain` selects the TTR POC.
+// Record intake. `sourceDomain` is evidence context; only `ownerDomain` selects the TTR Manager.
 // A receiver may start a supported lane only when targetPocSessionId resolves to that same receiver.
 ttr_intake({
   reporter: "customer", source: "support:123", sourceDomain: "storefront",
@@ -103,8 +106,16 @@ ttr_intake({
   reproduction: "submit Visa test card", evidenceReferences: ["ticket:123", "request:req-7"]
 })
 
+// Preferred when the owner domain is known: resolve its active Manager without copying a session ID.
+// Fails with `/ttr register payments` guidance when no active Manager exists.
+ttr_intake_for_owner({
+  reporter: "customer", source: "support:123", sourceDomain: "storefront", ownerDomain: "payments",
+  symptom: "card declined", impact: "checkout blocked", environment: "prod",
+  reproduction: "submit Visa test card", evidenceReferences: ["ticket:123", "request:req-7"]
+})
+
 // One-time explicit migration for a legacy record created before the routing contract.
-// Only the active owner POC named by targetPocSessionId can re-attest it.
+// Only the active owner Manager named by targetPocSessionId can re-attest it.
 ttr_reattest_defect_authority({
   defectId: "ttr-…", sourceDomain: "babysitter-dv", ownerDomain: "ttr",
   targetPocSessionId: "<active-ttr-poc-session-id>"
@@ -116,7 +127,7 @@ ttr_assign_work_item({
   status: "in-progress", lifecycleStates: ["proposed", "in-progress", "ready-for-review", "closed"]
 })
 
-// Only the active, addressed owner POC may replace an authoritative item. TTR preserves BUG-123 in immutable audit history.
+// Only the active, addressed owner Manager may replace an authoritative item. TTR preserves BUG-123 in immutable audit history.
 ttr_reassign_work_item({
   defectId: "ttr-…", workItemId: "BUG-456", workItemPath: "backlog/BUG-456.md",
   status: "proposed", lifecycleStates: ["proposed", "in-progress", "closed"],

@@ -39,6 +39,68 @@ test("POC aliases register atomically and resolve to the same session", async ()
   for (const domain of records.map(record => record.domain)) {
     assert.equal((await plane.resolvePoc(domain))?.sessionId, poc.sessionId);
   }
+  assert.deepEqual(await plane.listPocs(), [{ ...records[0], aliases: records.map(record => record.domain).sort() }]);
+});
+
+test("a Manager receives one friendly name shared by every alias", async () => {
+  const { statePath } = await setup();
+  const plane = new TriageControlPlane({ statePath, random: () => 0 });
+  await plane.registerPocs(["payments", "billing"], poc, false);
+
+  const [manager] = await plane.listPocs();
+  assert.equal(manager.managerName, "Avery");
+  assert.deepEqual(manager.aliases, ["billing", "payments"]);
+});
+
+test("unregister removes one domain or an entire Manager registration", async () => {
+  const { statePath } = await setup();
+  const plane = new TriageControlPlane({ statePath });
+  await plane.registerPocs(["payments", "billing"], poc, false);
+
+  assert.deepEqual((await plane.unregisterPoc("payments")).removedDomains, ["payments"]);
+  assert.equal(await plane.resolvePoc("payments"), undefined);
+  assert.equal((await plane.resolvePoc("billing"))?.domain, "billing");
+  assert.deepEqual((await plane.listPocs()).map(({ domain, aliases }) => ({ domain, aliases })), [{ domain: "billing", aliases: ["billing"] }]);
+
+  assert.deepEqual((await plane.unregisterPoc("billing", true)).removedDomains, ["billing"]);
+  assert.deepEqual(await plane.listPocs(true), []);
+});
+
+test("legacy per-alias records compact on the next write without breaking routing", async () => {
+  const { statePath } = await setup();
+  const legacyRecord = { domain: "payments", canonicalDomain: "payments", ...poc, registeredAt: "2026-01-01T00:00:00.000Z", active: true };
+  await writeFile(statePath, JSON.stringify({
+    version: 1, defects: {}, registrations: {
+      payments: legacyRecord,
+      billing: { ...legacyRecord, domain: "billing" },
+    },
+  }));
+  const plane = new TriageControlPlane({ statePath });
+
+  assert.equal((await plane.resolvePoc("billing"))?.sessionId, poc.sessionId);
+  await plane.deactivatePoc("billing");
+  const persisted = JSON.parse(await readFile(statePath, "utf8"));
+  assert.deepEqual(Object.keys(persisted.registrations), ["payments"]);
+  assert.deepEqual(persisted.aliases, { payments: "payments", billing: "payments" });
+  assert.equal((await plane.resolvePoc("payments")), undefined);
+});
+
+test("legacy self-canonical aliases for one POC collapse into one listing", async () => {
+  const { statePath } = await setup();
+  const payments = { domain: "payments", canonicalDomain: "payments", ...poc, registeredAt: "2026-01-01T00:00:00.000Z", active: true };
+  await writeFile(statePath, JSON.stringify({
+    version: 1, defects: {}, aliases: { payments: "payments", billing: "billing" }, registrations: {
+      payments,
+      billing: { ...payments, domain: "billing", canonicalDomain: "billing", projectBoundary: "/other-repo" },
+    },
+  }));
+  const plane = new TriageControlPlane({ statePath });
+
+  const [manager] = await plane.listPocs();
+  assert.equal(manager.domain, "payments");
+  assert.deepEqual(manager.aliases, ["billing", "payments"]);
+  assert.equal(typeof manager.managerName, "string");
+  assert.equal((await plane.resolvePoc("billing"))?.domain, "payments");
 });
 
 test("non-POC intake produces an evidence-only handoff and does not claim delivery", async () => {
@@ -53,6 +115,25 @@ test("non-POC intake produces an evidence-only handoff and does not claim delive
   assert.equal(intake.handoff?.targetSessionId, poc.sessionId);
   assert.equal(intake.handoff?.delivery, "not-attempted");
   assert.deepEqual(Object.keys(intake.handoff.payload).sort(), ["defectId", "domain", "evidenceReferences", "impact", "sourceDomain", "symptom"]);
+});
+
+test("owner-resolved intake obtains its target from the active owner POC", async () => {
+  const { statePath } = await setup();
+  const plane = new TriageControlPlane({ statePath });
+  await plane.registerPoc("payments", poc, false);
+
+  const input = {
+    reporter: "customer", source: "support", sourceDomain: "storefront", ownerDomain: "payments",
+    symptom: "card declined", impact: "checkout blocked", environment: "prod", reproduction: "submit card", evidenceReferences: [], currentSessionId: poc.sessionId,
+  };
+  const intake = await plane.intakeForOwner(input);
+
+  assert.equal(intake.role, "poc");
+  assert.equal(intake.defect.intake.targetPocSessionId, poc.sessionId);
+  await assert.rejects(
+    () => plane.intakeForOwner({ ...input, ownerDomain: "missing" }),
+    /No active POC registration for missing; run \/ttr register missing/,
+  );
 });
 
 test("intake separates source from owner domain and fail-closes a target-POC mismatch", async () => {
