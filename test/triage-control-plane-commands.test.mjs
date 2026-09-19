@@ -111,6 +111,38 @@ test("/ttr Manager lifecycle commands reject other sessions and accept the Manag
   await commands.get("ttr").handler("deactivate payments", adminContext);
 });
 
+test("/ttr ui retrieves a defect by ID", async () => {
+  const triageControlPlane = await loadExtension();
+  const { api, commands, notifications, context } = setupApi();
+  context.ui.select = async () => "Find defect";
+  context.ui.input = async () => "missing-defect";
+  triageControlPlane(api);
+
+  await commands.get("ttr").handler("ui", context);
+  assert.equal(notifications.at(-1).message, "TTR defect not found: missing-defect");
+});
+
+test("/ttr UI reconciles an admin-selected defect through the authorized core path", async () => {
+  const triageControlPlane = await loadExtension("session-123");
+  const { api, commands, tools, context } = setupApi();
+  triageControlPlane(api);
+  await commands.get("ttr").handler("register payments", context);
+  const intake = await tools.get("ttr_intake_for_owner").execute("", {
+    reporter: "customer", source: "support", sourceDomain: "storefront", ownerDomain: "payments",
+    symptom: "declined", impact: "checkout blocked", environment: "prod", reproduction: "submit card", evidenceReferences: [],
+  }, undefined, undefined, context);
+  await commands.get("ttr").handler("register --admin", context);
+  const choices = ["Admin reconciliation", "Mark assignment orphaned"];
+  const inputs = [intake.details.defect.id, "manager session expired", "ticket:123"];
+  context.ui.select = async () => choices.shift();
+  context.ui.input = async () => inputs.shift();
+  context.ui.confirm = async () => true;
+
+  await commands.get("ttr").handler("ui", context);
+  const lookup = await tools.get("ttr_admin_lookup").execute("", {}, undefined, undefined, context);
+  assert.equal(lookup.details.defects.find(defect => defect.id === intake.details.defect.id).pocAssignment.status, "orphaned");
+});
+
 test("ttr_intake_for_owner resolves the registered POC without a target session ID", async () => {
   const triageControlPlane = await loadExtension();
   const { api, commands, tools, context } = setupApi();
@@ -165,7 +197,7 @@ test("/ttr consolidates POC commands and derives an omitted domain from the repo
 
   assert.deepEqual([...commands.keys()], ["ttr"]);
   const complete = commands.get("ttr").getArgumentCompletions;
-  assert.deepEqual(complete("").map(({ value }) => value), ["register", "status", "list", "unregister", "deactivate", "autoname"]);
+  assert.deepEqual(complete("").map(({ value }) => value), ["register", "status", "list", "ui", "unregister", "deactivate", "autoname"]);
   assert.deepEqual(complete("st").map(({ value }) => value), ["status"]);
   assert.deepEqual(complete("register ").map(({ value }) => value), ["--replace", "--session-id", "--admin"]);
   assert.deepEqual(complete("list ").map(({ value }) => value), ["--active", "--json", "--admin"]);

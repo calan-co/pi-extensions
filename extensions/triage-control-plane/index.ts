@@ -18,6 +18,7 @@ const TTR_SUBCOMMANDS = [
   { value: "register", label: "register", description: "Register the active Manager for a domain" },
   { value: "status", label: "status", description: "Inspect a domain's active Manager" },
   { value: "list", label: "list", description: "Render Managers, aliases, and statuses" },
+  { value: "ui", label: "ui", description: "Open the interactive TTR defect console" },
   { value: "unregister", label: "unregister", description: "Remove a domain or an entire Manager" },
   { value: "deactivate", label: "deactivate", description: "Deactivate a domain's Manager" },
   { value: "autoname", label: "autoname", description: "Opt in to guarded TTR session naming" },
@@ -119,6 +120,71 @@ function parseListArgs(args: string): { activeOnly: boolean; json: boolean; admi
   return { activeOnly, json, admin };
 }
 
+function auditReferences(value: string): string[] { return value.split(",").map(item => item.trim()).filter(Boolean); }
+
+async function promptText(ctx: ExtensionContext, label: string, placeholder: string): Promise<string | undefined> {
+  const value = await ctx.ui.input(label, placeholder);
+  return value?.trim() || undefined;
+}
+
+async function promptWorkItem(ctx: ExtensionContext) {
+  const id = await promptText(ctx, "Work item ID:", "BUG-123");
+  const path = await promptText(ctx, "Work item path:", "backlog/BUG-123.md");
+  const status = await promptText(ctx, "Initial status:", "proposed");
+  const lifecycle = await promptText(ctx, "Lifecycle states (comma-separated):", "proposed,in-progress,closed");
+  if (!id || !path || !status || !lifecycle) return undefined;
+  return { id, path, status, lifecycleStates: auditReferences(lifecycle) };
+}
+
+async function runTtrUi(plane: TriageControlPlane, ctx: ExtensionContext): Promise<void> {
+  const action = await ctx.ui.select("TTR defects", ["Find defect", "Search/list defects", "Admin reconciliation"]);
+  if (!action) return;
+  const actorSessionId = currentSessionId(ctx);
+  if (action === "Find defect") {
+    const defectId = await promptText(ctx, "Defect ID:", "ttr-…");
+    if (!defectId) return;
+    const defect = await plane.getDefect(defectId);
+    ctx.ui.notify(defect ? JSON.stringify(defect, null, 2) : `TTR defect not found: ${defectId}`, defect ? "info" : "warning");
+    return;
+  }
+  if (action === "Search/list defects") {
+    const query = (await ctx.ui.input("Search defects (blank lists all):", "domain, symptom, work item…"))?.trim().toLowerCase() ?? "";
+    const defects = (await plane.adminLookup(actorSessionId)).defects.filter(defect => !query || JSON.stringify(defect).toLowerCase().includes(query));
+    if (defects.length === 0) {
+      ctx.ui.notify("No matching TTR defects", "info");
+      return;
+    }
+    const selected = await ctx.ui.select("Matching TTR defects", defects.map(defect => `${defect.id}  ${defect.domain}  ${defect.intake.symptom}`));
+    const defect = defects.find(item => selected?.startsWith(item.id));
+    if (defect) ctx.ui.notify(JSON.stringify(defect, null, 2), "info");
+    return;
+  }
+  const operation = await ctx.ui.select("Admin reconciliation", ["Mark assignment orphaned", "Rebind work item", "Supersede work item"]);
+  if (!operation) return;
+  const defectId = await promptText(ctx, "Defect ID:", "ttr-…");
+  if (!defectId) return;
+  const reason = await promptText(ctx, "Reason:", "why this reconciliation is required");
+  const references = await promptText(ctx, "Evidence references (comma-separated):", "ticket:123, evidence/report.md");
+  if (!reason || !references || !await ctx.ui.confirm("Confirm TTR reconciliation", `${operation} for ${defectId}?`)) return;
+  const audit = { reason, evidenceReferences: auditReferences(references) };
+  if (operation === "Mark assignment orphaned") {
+    const defect = await plane.markPocAssignmentOrphaned(defectId, audit, actorSessionId);
+    ctx.ui.notify(`TTR defect reconciled: ${defect.id} assignment orphaned`, "info");
+    return;
+  }
+  const workItem = await promptWorkItem(ctx);
+  if (!workItem) return;
+  if (operation === "Rebind work item") {
+    const targetPocSessionId = await promptText(ctx, "Target Manager session ID:", "<Pi session ID>");
+    if (!targetPocSessionId) return;
+    const defect = await plane.adminRebindWorkItem(defectId, workItem, { ...audit, targetPocSessionId }, actorSessionId);
+    ctx.ui.notify(`TTR defect reconciled: ${defect.id} rebound`, "info");
+    return;
+  }
+  const defect = await plane.supersedeWorkItem(defectId, workItem, audit, actorSessionId);
+  ctx.ui.notify(`TTR defect reconciled: ${defect.id} superseded`, "info");
+}
+
 function ttrArgumentCompletions(prefix: string) {
   const hasTrailingSpace = /\s$/.test(prefix);
   const tokens = prefix.trim().split(/\s+/).filter(Boolean);
@@ -200,7 +266,7 @@ export default function triageControlPlane(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("ttr", {
-    description: "TTR control plane: register, status, list, unregister, deactivate, or autoname. Domains default to the current repository name.",
+    description: "TTR control plane: register, status, list, ui, unregister, deactivate, or autoname. Domains default to the current repository name.",
     getArgumentCompletions: ttrArgumentCompletions,
     handler: async (args, ctx) => {
       const [subcommand = "", ...rest] = (args || "").trim().split(/\s+/).filter(Boolean);
@@ -257,6 +323,11 @@ export default function triageControlPlane(pi: ExtensionAPI) {
         await syncSessionName(ctx);
         return;
       }
+      if (subcommand === "ui") {
+        if (subcommandArgs) throw new Error("Usage: /ttr ui");
+        await runTtrUi(plane, ctx);
+        return;
+      }
       if (subcommand === "unregister") {
         const input = parseUnregisterArgs(subcommandArgs, await domainFromContext(pi, ctx.cwd));
         if (input.admin) {
@@ -276,7 +347,7 @@ export default function triageControlPlane(pi: ExtensionAPI) {
         await syncSessionName(ctx);
         return;
       }
-      throw new Error("Usage: /ttr <register|status|list|unregister|deactivate|autoname> [domain]");
+      throw new Error("Usage: /ttr <register|status|list|ui|unregister|deactivate|autoname> [domain]");
     },
   });
 

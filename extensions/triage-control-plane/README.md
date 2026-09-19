@@ -89,6 +89,7 @@ Do not substitute a name, fabricate a target, or silently reroute an unreachable
 /ttr status [domain] [--json]                           # Manager status; JSON for agent use
 /ttr list [--active] [--json]                            # Manager table or JSON; --active hides inactive records
 /ttr list --admin [--json]                               # enrolled-admin table or JSON; requires active admin
+/ttr ui                                                  # interactive defect search, inspection, and admin reconciliation console
 /ttr register --admin [--session-id <id>]                # enroll an admin; first enrollment requires bootstrap allowlist
 /ttr unregister payments                                 # remove one domain; promotes another alias if needed
 /ttr unregister payments --all                           # remove the entire Manager and every domain alias
