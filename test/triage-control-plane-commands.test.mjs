@@ -19,13 +19,13 @@ test("TTR exposes domain-scoped tools and derives current session internally", a
   assert.ok(result.details.defect.audit[0].actorSessionId);
 });
 
-test("/ttr status renders the registered Manager row", async () => {
+test("/ttr status without a domain renders every registration for the current session", async () => {
   const extension = await loadExtension(); const { api, commands, context, notifications } = setup("manager"); extension(api);
-  await commands.get("ttr").handler("register", context);
+  await commands.get("ttr").handler("register risk", context);
 
   await commands.get("ttr").handler("status", context);
   assert.match(notifications.at(-1), /^MANAGER\s+DOMAIN\s+ALIASES\s+SESSION\s+STATUS/m);
-  assert.match(notifications.at(-1), /payments/);
+  assert.match(notifications.at(-1), /risk/);
   assert.match(notifications.at(-1), /manager/);
 });
 
