@@ -40,7 +40,7 @@ flowchart TD
 
 - Durable global state: `$PI_CODING_AGENT_DIR/triage-control-plane/state.json` (default `~/.pi/agent/triage-control-plane/state.json`), written through an exclusive lock plus atomic temp-file rename with restrictive permissions.
 - Manager session IDs come from `ctx.sessionManager.getSessionId()` (the documented session API); `/ttr register` never guesses one.
-- **Admin authority is separate from Manager authority.** Bootstrap the first admin by setting `TTR_ADMIN_SESSION_IDS` to a comma-separated explicit session-ID allowlist before loading TTR, then call `ttr_register_admin`. An enrolled active admin may enroll or deactivate later admins. A Manager registration, domain, repository path, or intake report never grants admin authority.
+- **Admin authority is separate from Manager authority.** Bootstrap exactly one first admin by setting `TTR_ADMIN_SESSION_IDS` to a comma-separated explicit session-ID allowlist before loading TTR, then have that same session call `ttr_register_admin` while the persisted admin registry is empty. An enrolled active admin may enroll later admins or permanently deactivate one through `ttr_deactivate_admin` or `/ttr admin-deactivate`; a deactivated bootstrap identity cannot self-enroll again. A Manager registration, domain, repository path, or intake report never grants admin authority.
 - Pi provides `ctx.cwd`, but no semantic domain API. When omitted from a TTR command, the domain is deterministically derived from the Git repository root name, falling back to the current directory name; supply a domain explicitly to override it.
 - Incoming `ttr_intake` reports must separately declare `sourceDomain`, `ownerDomain`, and `targetPocSessionId` (the retained compatibility field name for the target Manager). `ttr_intake_for_owner` keeps `sourceDomain` and `ownerDomain` explicit but atomically resolves the active target Manager. Neither tool infers ownership from the sender workspace or source domain.
 - Secrets are not accepted in records or tools. Store only evidence references/paths, receipts, and commit SHA evidence.
@@ -91,6 +91,7 @@ Do not substitute a name, fabricate a target, or silently reroute an unreachable
 /ttr list                                                # table: all friendly Managers, domains, aliases, and statuses
 /ttr list --active                                       # table: active Managers only
 /ttr admins                                              # requires explicitly enrolled active admin authority
+/ttr admin-deactivate <session-id>                       # active admin only; permanent revocation
 /ttr unregister payments                                 # remove one domain; promotes another alias if needed
 /ttr unregister payments --all                           # remove the entire Manager and every domain alias
 /ttr deactivate                                          # temporarily stop routing while retaining the Manager record
@@ -139,6 +140,7 @@ ttr_reassign_work_item({
 
 // Active TTR admins only. The first enrollment requires this session ID to be explicitly listed in TTR_ADMIN_SESSION_IDS.
 ttr_register_admin({ sessionId: "<admin-session-id>" })
+ttr_deactivate_admin({ sessionId: "<admin-session-id>" })
 ttr_admin_lookup({})
 ttr_mark_poc_assignment_orphaned({ defectId: "ttr-…", reason: "original Manager session deleted", evidenceReferences: ["incident:42"] })
 // The target must be the active registered Manager for the defect domain; the work-item path is always explicit.

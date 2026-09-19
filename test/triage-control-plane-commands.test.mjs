@@ -4,12 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-async function loadExtension() {
+async function loadExtension(adminSessionIds = "") {
   process.env.PI_CODING_AGENT_DIR = await mkdtemp(join(tmpdir(), "ttr-command-state-"));
+  process.env.TTR_ADMIN_SESSION_IDS = adminSessionIds;
   return (await import(`../extensions/triage-control-plane/index.ts?test=${Date.now()}-${Math.random()}`)).default;
 }
 
-function setupApi() {
+function setupApi(sessionId = "session-123") {
   const commands = new Map();
   const tools = new Map();
   const notifications = [];
@@ -37,7 +38,7 @@ registerTool(spec) { tools.set(spec.name, spec); },
     },
     context: {
       cwd: "/repos/payments/src",
-      sessionManager: { getSessionId: () => "session-123" },
+      sessionManager: { getSessionId: () => sessionId },
       ui: { notify(message, level) { notifications.push({ message, level }); } },
     },
   };
@@ -50,6 +51,7 @@ const { api, appendedEntries, commands, tools, notifications, sessionNames, cont
 
   assert.ok(tools.has("ttr_reassign_work_item"));
   assert.ok(tools.has("ttr_intake_for_owner"));
+  assert.ok(tools.has("ttr_deactivate_admin"));
   assert.ok(tools.has("ttr_admin_lookup"));
   assert.ok(tools.has("ttr_mark_poc_assignment_orphaned"));
   assert.ok(tools.has("ttr_admin_rebind_work_item"));
@@ -107,6 +109,20 @@ test("ttr_intake_for_owner resolves the registered POC without a target session 
   assert.equal(result.details.defect.intake.targetPocSessionId, "session-123");
 });
 
+test("/ttr admin deactivation command executes only for an enrolled active admin", async () => {
+  const triageControlPlane = await loadExtension("session-123");
+  const { api, commands, tools, notifications, context } = setupApi();
+  triageControlPlane(api);
+
+  await tools.get("ttr_register_admin").execute("tool", { sessionId: "session-123" }, undefined, undefined, context);
+  await tools.get("ttr_register_admin").execute("tool", { sessionId: "admin-2" }, undefined, undefined, context);
+  await assert.rejects(() => commands.get("ttr").handler("admin-deactivate admin-2", setupApi("untrusted").context), /explicitly enrolled active TTR admin/i);
+  await commands.get("ttr").handler("admin-deactivate admin-2", context);
+  assert.equal(notifications.at(-1).message, "TTR admin deactivated: admin-2");
+  await assert.rejects(() => tools.get("ttr_deactivate_admin").execute("tool", { sessionId: "session-123" }, undefined, undefined, setupApi("admin-2").context), /explicitly enrolled active TTR admin/i);
+  await assert.rejects(() => tools.get("ttr_register_admin").execute("tool", { sessionId: "admin-2" }, undefined, undefined, context), /deactivated and cannot be reactivated/i);
+});
+
 test("/ttr autoname opt-in updates only unclaimed TTR session names and force can override", async () => {
   const triageControlPlane = await loadExtension();
   const { api, commands, sessionNames, setSessionName, context } = setupApi();
@@ -131,7 +147,7 @@ test("/ttr consolidates POC commands and derives an omitted domain from the repo
 
   assert.deepEqual([...commands.keys()], ["ttr"]);
   const complete = commands.get("ttr").getArgumentCompletions;
-  assert.deepEqual(complete("").map(({ value }) => value), ["register", "status", "list", "unregister", "deactivate", "admins", "autoname"]);
+  assert.deepEqual(complete("").map(({ value }) => value), ["register", "status", "list", "unregister", "deactivate", "admins", "admin-deactivate", "autoname"]);
   assert.deepEqual(complete("st").map(({ value }) => value), ["status"]);
   assert.deepEqual(complete("register ").map(({ value }) => value), ["--replace", "--session-id"]);
   assert.deepEqual(complete("list ").map(({ value }) => value), ["--active"]);

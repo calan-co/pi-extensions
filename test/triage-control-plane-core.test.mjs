@@ -217,6 +217,23 @@ test("an active authorized defect owner can reassign a work item with immutable 
   await assert.rejects(() => plane.reassignWorkItem(defect.id, { id: "BUG-4", path: "backlog/BUG-3.md", status: "proposed", lifecycleStates: ["proposed"] }, { reason: "wrong queue", evidenceReferences: ["ticket:456"] }, poc.sessionId), /already authoritative for defect/i);
 });
 
+test("bootstrap enrollment is one-time and admin deactivation is active-admin-only and permanent", async () => {
+  const { statePath } = await setup();
+  const firstAdmin = "bootstrap-admin";
+  const secondAdmin = "other-bootstrap-admin";
+  const plane = new TriageControlPlane({ statePath, bootstrapAdminSessionIds: [firstAdmin, secondAdmin] });
+
+  await plane.registerAdmin(firstAdmin, firstAdmin);
+  await assert.rejects(() => plane.registerAdmin(secondAdmin, secondAdmin), /only an active admin may register an admin/i);
+  await plane.registerAdmin(secondAdmin, firstAdmin);
+  await assert.rejects(() => plane.deactivateAdmin(secondAdmin, "untrusted"), /explicitly enrolled active TTR admin/i);
+  const deactivated = await plane.deactivateAdmin(secondAdmin, firstAdmin);
+  assert.equal(deactivated.active, false);
+  await assert.rejects(() => plane.registerAdmin(secondAdmin, firstAdmin), /deactivated and cannot be reactivated/i);
+  await plane.deactivateAdmin(firstAdmin, firstAdmin);
+  await assert.rejects(() => plane.registerAdmin(firstAdmin, firstAdmin), /only an active admin may register an admin/i);
+});
+
 test("explicit admins reconcile orphaned Managers, rebind active sessions, and retain supersession history", async () => {
   const { statePath } = await setup();
   const adminSessionId = "ttr-admin-1";

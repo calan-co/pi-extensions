@@ -318,10 +318,13 @@ export class TriageControlPlane {
     if (!target || !actor) throw new Error("admin and actor sessionId are required");
     return this.transaction((state) => {
       state.admins ??= {};
-      const bootstrapped = (this.options.bootstrapAdminSessionIds ?? []).includes(target) && actor === target;
+      const existing = state.admins[target];
+      const bootstrapped = Object.keys(state.admins).length === 0 && (this.options.bootstrapAdminSessionIds ?? []).includes(target) && actor === target;
       if (!bootstrapped && !this.isActiveAdmin(state, actor)) {
         throw new Error("Only an active admin may register an admin; first admin must be explicitly bootstrapped");
       }
+      if (existing && !existing.active) throw new Error(`Admin ${target} is deactivated and cannot be reactivated`);
+      if (existing) return existing;
       const record: AdminRecord = { sessionId: target, registeredAt: this.now(), active: true };
       state.admins[target] = record;
       return record;

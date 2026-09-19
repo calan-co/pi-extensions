@@ -21,6 +21,7 @@ const TTR_SUBCOMMANDS = [
   { value: "unregister", label: "unregister", description: "Remove a domain or an entire Manager" },
   { value: "deactivate", label: "deactivate", description: "Deactivate a domain's Manager" },
   { value: "admins", label: "admins", description: "List explicitly enrolled TTR admins" },
+  { value: "admin-deactivate", label: "admin-deactivate", description: "Revoke an enrolled TTR admin" },
   { value: "autoname", label: "autoname", description: "Opt in to guarded TTR session naming" },
 ] as const;
 
@@ -168,7 +169,7 @@ export default function triageControlPlane(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("ttr", {
-    description: "TTR control plane: register, status, list, unregister, explicit admin lookup, deactivate, or autoname. Domains default to the current repository name.",
+    description: "TTR control plane: register, status, list, unregister, explicit admin lookup/revocation, deactivate, or autoname. Domains default to the current repository name.",
     getArgumentCompletions: ttrArgumentCompletions,
     handler: async (args, ctx) => {
       const [subcommand = "", ...rest] = (args || "").trim().split(/\s+/).filter(Boolean);
@@ -189,6 +190,13 @@ export default function triageControlPlane(pi: ExtensionAPI) {
       if (subcommand === "admins") {
         if (subcommandArgs) throw new Error("Usage: /ttr admins");
         ctx.ui.notify(JSON.stringify(await plane.listAdmins(currentSessionId(ctx)), null, 2), "info");
+        return;
+      }
+      if (subcommand === "admin-deactivate") {
+        const sessionId = subcommandArgs.trim();
+        if (!sessionId || /\s/.test(sessionId)) throw new Error("Usage: /ttr admin-deactivate <session-id>");
+        const record = await plane.deactivateAdmin(sessionId, currentSessionId(ctx));
+        ctx.ui.notify(`TTR admin deactivated: ${record.sessionId}`, "info");
         return;
       }
       if (subcommand === "autoname") {
@@ -232,7 +240,7 @@ export default function triageControlPlane(pi: ExtensionAPI) {
         await syncSessionName(ctx);
         return;
       }
-      throw new Error("Usage: /ttr <register|status|list|unregister|deactivate|admins|autoname> [domain]");
+      throw new Error("Usage: /ttr <register|status|list|unregister|deactivate|admins|admin-deactivate|autoname> [domain]");
     },
   });
 
@@ -282,6 +290,11 @@ export default function triageControlPlane(pi: ExtensionAPI) {
     name: "ttr_register_admin", label: "Register TTR Admin", description: "Enroll an explicit TTR admin. The first admin must be named in TTR_ADMIN_SESSION_IDS; later enrollment requires an active admin.",
     parameters: Type.Object({ sessionId: Type.String() }),
     async execute(_id, params, _signal, _update, ctx) { return json(await plane.registerAdmin(params.sessionId, currentSessionId(ctx))); },
+  });
+  pi.registerTool({
+    name: "ttr_deactivate_admin", label: "Deactivate TTR Admin", description: "An active TTR admin permanently deactivates another enrolled admin; inactive records cannot be reactivated.",
+    parameters: Type.Object({ sessionId: Type.String() }),
+    async execute(_id, params, _signal, _update, ctx) { return json(await plane.deactivateAdmin(params.sessionId, currentSessionId(ctx))); },
   });
   pi.registerTool({
     name: "ttr_admin_lookup", label: "TTR Admin Lookup", description: "Inspect all defects, Managers, assignment histories, and computed orphan state. Requires explicit active-admin authority.",
