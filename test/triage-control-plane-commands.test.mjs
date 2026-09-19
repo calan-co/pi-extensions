@@ -122,6 +122,21 @@ test("/ttr ui retrieves a defect by ID", async () => {
   assert.equal(notifications.at(-1).message, "TTR defect not found: missing-defect");
 });
 
+test("/ttr UI asks for a rebind target before the final confirmation", async () => {
+  const triageControlPlane = await loadExtension();
+  const { api, commands, context } = setupApi();
+  const choices = ["Admin reconciliation", "Rebind work item"];
+  const answers = ["ttr-123", "reason", "ticket:123", "BUG-2", "backlog/BUG-2.md", "proposed", "proposed,closed", "target-session"];
+  const labels = [];
+  context.ui.select = async () => choices.shift();
+  context.ui.input = async (label) => { labels.push(label); return answers.shift(); };
+  context.ui.confirm = async () => false;
+  triageControlPlane(api);
+
+  await commands.get("ttr").handler("ui", context);
+  assert.ok(labels.includes("Target Manager session ID:"));
+});
+
 test("/ttr UI reconciles an admin-selected defect through the authorized core path", async () => {
   const triageControlPlane = await loadExtension("session-123");
   const { api, commands, tools, context } = setupApi();
