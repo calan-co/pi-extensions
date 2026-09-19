@@ -163,6 +163,19 @@ async function runTtrUi(plane: TriageControlPlane, ctx: ExtensionContext): Promi
   if (!operation) return;
   const defectId = await promptText(ctx, "Defect ID:", "ttr-…");
   if (!defectId) return;
+  let targetPocSessionId: string | undefined;
+  let targetLabel = "";
+  if (operation === "Rebind work item") {
+    const target = await promptText(ctx, "Target Manager domain or session ID:", "payments or <Pi session ID>");
+    if (!target) return;
+    const manager = await plane.resolvePoc(target) ?? (await plane.adminLookup(actorSessionId)).pocs.find(record => record.active && record.sessionId === target);
+    if (!manager) {
+      ctx.ui.notify(`No active target Manager: ${target}`, "warning");
+      return;
+    }
+    targetPocSessionId = manager.sessionId;
+    targetLabel = ` → ${manager.domain}`;
+  }
   const reason = await promptText(ctx, "Reason:", "why this reconciliation is required");
   const references = await promptText(ctx, "Evidence references (comma-separated):", "ticket:123, evidence/report.md");
   if (!reason || !references) return;
@@ -175,9 +188,7 @@ async function runTtrUi(plane: TriageControlPlane, ctx: ExtensionContext): Promi
   }
   const workItem = await promptWorkItem(ctx);
   if (!workItem) return;
-  const targetPocSessionId = operation === "Rebind work item" ? await promptText(ctx, "Target Manager session ID:", "<Pi session ID>") : undefined;
-  if (operation === "Rebind work item" && !targetPocSessionId) return;
-  if (!await ctx.ui.confirm("Confirm TTR reconciliation", `${operation} for ${defectId}?`)) return;
+  if (!await ctx.ui.confirm("Confirm TTR reconciliation", `${operation} for ${defectId}${targetLabel}?`)) return;
   if (targetPocSessionId) {
     const defect = await plane.adminRebindWorkItem(defectId, workItem, { ...audit, targetPocSessionId }, actorSessionId);
     ctx.ui.notify(`TTR defect reconciled: ${defect.id} rebound`, "info");
