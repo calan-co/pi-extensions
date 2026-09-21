@@ -37,11 +37,14 @@ Do not edit `state.json` directly. TTR has no external transport: requester-mess
 /ttr list [--active] [--json]
 /ttr list [--active] --select  # select a registered persisted Pi session, then resume it here
 /ttr list --admin
+/ttr restore                    # reopen active registered Manager sessions in stacked panes under Zellij tab `ttr`
 /ttr ui                         # inspect a defect or transfer coordinator as admin
 /ttr unregister [domain] [--all]
 /ttr unregister <session-id> --admin
 /ttr deactivate [domain]
 ```
+
+`/ttr restore` is read-only with respect to TTR state. It requires a persisted Pi session and a live Zellij parent; it focuses an existing `ttr` tab rather than creating duplicate panes.
 
 ## Tool flow
 

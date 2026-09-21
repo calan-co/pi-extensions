@@ -55,6 +55,17 @@ test("list selection resumes a selected registered Pi session", async () => {
   assert.equal(context.path, "/sessions/manager.jsonl");
 });
 
+test("restore opens registered persisted sessions in a stacked ttr Zellij tab", async () => {
+  const { restoreTtrSessions } = await loadModule(); const calls = [], notifications = [], previous = { session: process.env.ZELLIJ_SESSION_NAME, pane: process.env.ZELLIJ_PANE_ID }; process.env.ZELLIJ_SESSION_NAME = "workspace"; process.env.ZELLIJ_PANE_ID = "1";
+  try {
+    await restoreTtrSessions({}, { cwd: "/fallback", ui: { notify(message) { notifications.push(message); } } }, [{ domain: "payments", aliases: [], sessionId: "payments", active: true }, { domain: "risk", aliases: [], sessionId: "risk", active: true }], async () => [{ id: "payments", name: "Payments", path: "/sessions/payments.jsonl", cwd: "/repo/payments" }, { id: "risk", name: "Risk", path: "/sessions/risk.jsonl", cwd: "/repo/risk" }], async args => { calls.push(args); return args.includes("new-tab") ? { code: 0, stdout: "7\n", stderr: "" } : { code: 0, stdout: "", stderr: "" }; });
+  } finally { if (previous.session === undefined) delete process.env.ZELLIJ_SESSION_NAME; else process.env.ZELLIJ_SESSION_NAME = previous.session; if (previous.pane === undefined) delete process.env.ZELLIJ_PANE_ID; else process.env.ZELLIJ_PANE_ID = previous.pane; }
+  assert.deepEqual(calls[0], ["action", "query-tab-names"]);
+  assert.deepEqual(calls[1], ["action", "new-tab", "--name", "ttr", "--cwd", "/repo/payments", "--", "pi", "--session", "/sessions/payments.jsonl"]);
+  assert.deepEqual(calls[2], ["action", "new-pane", "--tab-id", "7", "--cwd", "/repo/risk", "--name", "ttr: Risk", "--stacked", "--no-focus", "--", "pi", "--session", "/sessions/risk.jsonl"]);
+  assert.match(notifications.at(-1), /Restored 2 TTR sessions/);
+});
+
 test("transfer is available through UI and only calls the control plane through a current session", async () => {
   const extension = await loadExtension(); const manager = setup(); extension(manager.api);
   await manager.commands.get("ttr").handler("register payments", manager.context);
