@@ -44,7 +44,7 @@ Do not edit `state.json` directly. TTR has no external transport: requester-mess
 /ttr deactivate [domain]
 ```
 
-`/ttr restore` is read-only with respect to TTR state. It requires a persisted Pi session and a live Zellij parent; it focuses an existing `ttr` tab rather than creating duplicate panes.
+`/ttr restore` is read-only with respect to TTR state. It requires persisted Pi sessions and a live Zellij parent. In an existing `ttr` tab it keeps verified live `pi --session` panes, replaces an unambiguous exited pane with the matching session, creates stacked panes for missing sessions, then fails clearly unless every active registered Manager session is verified live.
 
 ## Tool flow
 
