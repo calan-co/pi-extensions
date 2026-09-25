@@ -24,28 +24,30 @@ type ZellijPane = { id: number; tab_id: number; tab_name: string; pane_cwd?: str
 const panes = (output: string): ZellijPane[] => { try { const value = JSON.parse(output); if (!Array.isArray(value)) throw new Error(); return value; } catch { throw new Error("zellij list-panes returned invalid JSON"); } };
 const activePaneFor = (pane: ZellijPane, session: StoredSession) => !pane.is_plugin && !pane.exited && (pane.pane_command ?? pane.terminal_command ?? "").includes(session.path);
 const paneArgs = (session: StoredSession, cwd: string) => ["--cwd", cwd, "--name", `ttr: ${session.name ?? session.id}`, "--", "pi", "--session", session.path];
-export async function restoreTtrSessions(pi: ExtensionAPI, ctx: ExtensionCommandContext, pocs: PocListEntry[], loadSessions = loadPiSessions, run: ZellijRunner = args => pi.exec("zellij", args, { timeout: 10_000 })) {
-  if (!process.env.ZELLIJ_SESSION_NAME || !process.env.ZELLIJ_PANE_ID) { ctx.ui.notify("/ttr restore must run inside Zellij", "warning"); return; }
+export async function restoreTtrSessions(pi: ExtensionAPI, ctx: ExtensionCommandContext, pocs: PocListEntry[], loadSessions = loadPiSessions, run: ZellijRunner = args => pi.exec("zellij", args, { timeout: 10_000 }), targetSession?: string) {
+  if (!targetSession && (!process.env.ZELLIJ_SESSION_NAME || !process.env.ZELLIJ_PANE_ID)) { ctx.ui.notify("/ttr restore must run inside Zellij or name an active Zellij session", "warning"); return; }
   const managerIds = new Set(pocs.filter(poc => poc.active).map(poc => poc.sessionId)); let sessions: StoredSession[];
   try { sessions = (await loadSessions()).filter(session => managerIds.has(session.id)).sort((a, b) => (a.name ?? a.id).localeCompare(b.name ?? b.id)); } catch { ctx.ui.notify("Unable to list persisted Pi sessions for TTR restore", "error"); return; }
   if (!sessions.length) { ctx.ui.notify("No persisted Pi sessions match active TTR Managers", "warning"); return; }
   const execute = async (args: string[]) => { const result = await run(args); if (result.code !== 0) throw new Error(`zellij ${args.slice(1, 3).join(" ")} failed: ${result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`}`); return result; };
-  const tabs = await execute(["action", "query-tab-names"]); let tabId: string;
+  if (targetSession) { const active = await execute(["list-sessions", "--short"]); if (!active.stdout.split(/\r?\n/).map(name => name.trim()).includes(targetSession)) throw new Error(`Zellij session ${targetSession} is not active`); }
+  const action = (args: string[]) => execute(targetSession ? ["--session", targetSession, ...args] : args);
+  const tabs = await action(["action", "query-tab-names"]); let tabId: string;
   if (tabs.stdout.split(/\r?\n/).map(name => name.trim()).includes("ttr")) {
-    const existing = panes((await execute(["action", "list-panes", "--json"])).stdout).filter(pane => pane.tab_name === "ttr"), id = existing[0]?.tab_id;
+    const existing = panes((await action(["action", "list-panes", "--json"])).stdout).filter(pane => pane.tab_name === "ttr"), id = existing[0]?.tab_id;
     if (id === undefined) throw new Error("TTR tab exists but Zellij returned no panes for it");
-    tabId = String(id); await execute(["action", "go-to-tab-name", "ttr"]);
+    tabId = String(id); await action(["action", "go-to-tab-name", "ttr"]);
     for (const session of sessions) {
       if (existing.some(pane => activePaneFor(pane, session))) continue;
       const cwd = session.cwd ?? ctx.cwd, exited = existing.filter(pane => !pane.is_plugin && pane.exited && pane.pane_cwd === cwd);
-      if (exited.length === 1) await execute(["action", "new-pane", "--in-place", "--close-replaced-pane", "--pane-id", String(exited[0]!.id), ...paneArgs(session, cwd)]);
-      else await execute(["action", "new-pane", "--tab-id", tabId, ...paneArgs(session, cwd).slice(0, 4), "--stacked", "--no-focus", ...paneArgs(session, cwd).slice(4)]);
+      if (exited.length === 1) await action(["action", "new-pane", "--in-place", "--close-replaced-pane", "--pane-id", String(exited[0]!.id), ...paneArgs(session, cwd)]);
+      else await action(["action", "new-pane", "--tab-id", tabId, ...paneArgs(session, cwd).slice(0, 4), "--stacked", "--no-focus", ...paneArgs(session, cwd).slice(4)]);
     }
   } else {
-    const first = sessions[0]!, created = await execute(["action", "new-tab", "--name", "ttr", "--cwd", first.cwd ?? ctx.cwd, "--", "pi", "--session", first.path]); const id = created.stdout.trim().match(/^\d+$/)?.[0]; if (!id) throw new Error(`zellij new-tab did not return a tab ID: ${created.stdout.trim() || "(empty output)"}`); tabId = id;
-    for (const session of sessions.slice(1)) { const cwd = session.cwd ?? ctx.cwd; await execute(["action", "new-pane", "--tab-id", tabId, ...paneArgs(session, cwd).slice(0, 4), "--stacked", "--no-focus", ...paneArgs(session, cwd).slice(4)]); }
+    const first = sessions[0]!, created = await action(["action", "new-tab", "--name", "ttr", "--cwd", first.cwd ?? ctx.cwd, "--", "pi", "--session", first.path]); const id = created.stdout.trim().match(/^\d+$/)?.[0]; if (!id) throw new Error(`zellij new-tab did not return a tab ID: ${created.stdout.trim() || "(empty output)"}`); tabId = id;
+    for (const session of sessions.slice(1)) { const cwd = session.cwd ?? ctx.cwd; await action(["action", "new-pane", "--tab-id", tabId, ...paneArgs(session, cwd).slice(0, 4), "--stacked", "--no-focus", ...paneArgs(session, cwd).slice(4)]); }
   }
-  const restored = panes((await execute(["action", "list-panes", "--json"])).stdout).filter(pane => pane.tab_id === Number(tabId)); const missing = sessions.filter(session => !restored.some(pane => activePaneFor(pane, session)));
+  const restored = panes((await action(["action", "list-panes", "--json"])).stdout).filter(pane => pane.tab_id === Number(tabId)); const missing = sessions.filter(session => !restored.some(pane => activePaneFor(pane, session)));
   if (missing.length) throw new Error(`TTR restore incomplete; active Pi panes missing for: ${missing.map(session => session.name ?? session.id).join(", ")}`);
   ctx.ui.notify(`Restored ${sessions.length} TTR sessions in Zellij tab ttr`, "info");
 }
@@ -73,7 +75,7 @@ export default function triageControlPlane(pi: ExtensionAPI) {
   pi.registerCommand("ttr", { description: "TTR control plane", getArgumentCompletions: (prefix: string) => ["register", "status", "list", "restore", "ui", "unregister", "deactivate"].filter(value => value.startsWith(prefix.trim())).map(value => ({ value, label: value })), handler: async (args, ctx) => {
     const [action = "", ...rest] = (args ?? "").trim().split(/\s+/).filter(Boolean); const values = rest.filter(value => !value.startsWith("--")); const actor = currentSessionId(ctx); const defaultDomain = await domainFromContext(pi, ctx.cwd);
     if (action === "register") { if (rest.includes("--admin")) { const target = values[0] ?? actor; await plane.registerAdmin(target, actor); ctx.ui.notify(`TTR admin registered: ${target}`, "info"); return; } const records = await plane.registerPocs(values.length ? values : [defaultDomain], { sessionId: actor, projectBoundary: ctx.cwd }, rest.includes("--replace")); ctx.ui.notify(`TTR Manager registered: ${records.map(record => record.domain).join(", ")} → ${actor}`, "info"); return; }
-    if (action === "restore") return restoreTtrSessions(pi, ctx, await plane.listPocs(false));
+    if (action === "restore") { if (values.length > 1) throw new Error("Usage: /ttr restore [zellij-session]"); return restoreTtrSessions(pi, ctx, await plane.listPocs(false), loadPiSessions, undefined, values[0]); }
     if (action === "status" && values.length === 0) { const records = (await plane.listPocs(true)).filter(record => record.sessionId === actor); ctx.ui.notify(records.length ? (rest.includes("--json") ? JSON.stringify(records, null, 2) : pocTable(records, await sessionNames(pi, actor, records.map(record => record.sessionId)))) : `No active Manager registered for current session ${actor}`, records.length ? "info" : "warning"); return; }
     if (action === "status" || action === "manager" || action === "poc") { const requestedDomain = values[0] ?? defaultDomain, record = await plane.resolvePoc(requestedDomain); ctx.ui.notify(record ? (rest.includes("--json") ? JSON.stringify(record, null, 2) : pocTable([{ ...record, aliases: [] }], await sessionNames(pi, actor, [record.sessionId]))) : `No active Manager registered for ${requestedDomain}`, record ? "info" : "warning"); return; }
     if (action === "list" || action === "pocs") { if (rest.includes("--admin")) { const admins = await plane.listAdmins(actor), pocs = await plane.listPocs(true); ctx.ui.notify(rest.includes("--json") ? JSON.stringify(admins, null, 2) : adminTable(admins, pocs, await sessionNames(pi, actor, [...admins.map(admin => admin.sessionId), ...pocs.map(poc => poc.sessionId)])), "info"); } else { const records = await plane.listPocs(!rest.includes("--active")); if (rest.includes("--select")) return selectTtrSession(ctx, records); ctx.ui.notify(rest.includes("--json") || action === "pocs" ? JSON.stringify(records, null, 2) : pocTable(records, await sessionNames(pi, actor, records.map(record => record.sessionId))), "info"); } return; }

@@ -78,6 +78,15 @@ test("restore replaces exited TTR panes and adds missing registered sessions aft
   assert.match(notifications.at(-1), /Restored 2 TTR sessions/);
 });
 
+test("restore targets a named active Zellij session without requiring a local Zellij parent", async () => {
+  const { restoreTtrSessions } = await loadModule(); const calls = [], previous = { session: process.env.ZELLIJ_SESSION_NAME, pane: process.env.ZELLIJ_PANE_ID }; delete process.env.ZELLIJ_SESSION_NAME; delete process.env.ZELLIJ_PANE_ID;
+  try {
+    await restoreTtrSessions({}, { cwd: "/fallback", ui: { notify() {} } }, [{ domain: "payments", aliases: [], sessionId: "payments", active: true }], async () => [{ id: "payments", name: "Payments", path: "/sessions/payments.jsonl", cwd: "/repo/payments" }], async args => { calls.push(args); if (args[0] === "list-sessions") return { code: 0, stdout: "rebooted\n", stderr: "" }; if (args.includes("query-tab-names")) return { code: 0, stdout: "", stderr: "" }; if (args.includes("new-tab")) return { code: 0, stdout: "7\n", stderr: "" }; if (args.includes("list-panes")) return { code: 0, stdout: JSON.stringify([{ id: 1, tab_id: 7, tab_name: "ttr", pane_command: "pi --session /sessions/payments.jsonl", exited: false, is_plugin: false }]), stderr: "" }; return { code: 0, stdout: "", stderr: "" }; }, "rebooted");
+  } finally { if (previous.session === undefined) delete process.env.ZELLIJ_SESSION_NAME; else process.env.ZELLIJ_SESSION_NAME = previous.session; if (previous.pane === undefined) delete process.env.ZELLIJ_PANE_ID; else process.env.ZELLIJ_PANE_ID = previous.pane; }
+  assert.deepEqual(calls[0], ["list-sessions", "--short"]);
+  assert.deepEqual(calls[1], ["--session", "rebooted", "action", "query-tab-names"]);
+});
+
 test("restore fails clearly when a registered session cannot be verified active", async () => {
   const { restoreTtrSessions } = await loadModule(); const previous = { session: process.env.ZELLIJ_SESSION_NAME, pane: process.env.ZELLIJ_PANE_ID }; process.env.ZELLIJ_SESSION_NAME = "workspace"; process.env.ZELLIJ_PANE_ID = "1";
   try {
