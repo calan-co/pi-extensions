@@ -6,7 +6,7 @@ import test from "node:test";
 
 async function loadModule() { process.env.PI_CODING_AGENT_DIR = await mkdtemp(join(tmpdir(), "ttr-command-state-")); process.env.TTR_ADMIN_SESSION_IDS = "admin"; return import(`../extensions/triage-control-plane/index.ts?test=${Date.now()}-${Math.random()}`); }
 async function loadExtension() { return (await loadModule()).default; }
-function setup(sessionId = "manager", sessionName = "Manager session") { const commands = new Map(), tools = new Map(), notifications = []; return { commands, tools, notifications, api: { getSessionName: () => sessionName, on() {}, registerCommand(name, spec) { commands.set(name, spec); }, registerTool(spec) { tools.set(spec.name, spec); }, async exec(command, args) { if (args.includes("--show-toplevel")) return { code: 0, stdout: "/repo/payments\n" }; if (args[0] === "status") return { code: 0, stdout: "" }; return { code: 0, stdout: "head" }; } }, context: { cwd: "/repo/payments", sessionManager: { getSessionId: () => sessionId }, ui: { notify(message) { notifications.push(message); }, input: async () => undefined, select: async () => undefined } } }; }
+function setup(sessionId = "manager", sessionName = "Manager session") { const commands = new Map(), tools = new Map(), events = new Map(), notifications = []; return { commands, tools, events, notifications, api: { getSessionName: () => sessionName, on(name, handler) { events.set(name, handler); }, registerCommand(name, spec) { commands.set(name, spec); }, registerTool(spec) { tools.set(spec.name, spec); }, async exec(command, args) { if (args.includes("--show-toplevel")) return { code: 0, stdout: "/repo/payments\n" }; if (args[0] === "status") return { code: 0, stdout: "" }; return { code: 0, stdout: "head" }; } }, context: { cwd: "/repo/payments", sessionManager: { getSessionId: () => sessionId }, ui: { notify(message) { notifications.push(message); }, input: async () => undefined, select: async () => undefined } } }; }
 const intake = { reporter: "r", source: "s", sourceDomain: "storefront", coordinatorDomain: "payments", symptom: "x", impact: "high", environment: "prod", reproduction: "r", evidenceReferences: [] };
 
 test("TTR exposes domain-scoped tools and derives current session internally", async () => {
@@ -85,6 +85,25 @@ test("restore targets a named active Zellij session without requiring a local Ze
   } finally { if (previous.session === undefined) delete process.env.ZELLIJ_SESSION_NAME; else process.env.ZELLIJ_SESSION_NAME = previous.session; if (previous.pane === undefined) delete process.env.ZELLIJ_PANE_ID; else process.env.ZELLIJ_PANE_ID = previous.pane; }
   assert.deepEqual(calls[0], ["list-sessions", "--short"]);
   assert.deepEqual(calls[1], ["--session", "rebooted", "action", "query-tab-names"]);
+});
+
+test("spawn opens a named Manager Pi pane with one-shot registration domains", async () => {
+  const { spawnTtrManager } = await loadModule(); const calls = [], previous = { session: process.env.ZELLIJ_SESSION_NAME, pane: process.env.ZELLIJ_PANE_ID }; process.env.ZELLIJ_SESSION_NAME = "workspace"; process.env.ZELLIJ_PANE_ID = "1";
+  try {
+    await spawnTtrManager({}, { cwd: "/repo/payments", ui: { notify() {} } }, "Jamie", ["payments", "billing"], async args => { calls.push(args); if (args.includes("query-tab-names")) return { code: 0, stdout: "ttr\n", stderr: "" }; if (args.includes("list-panes")) return { code: 0, stdout: JSON.stringify([{ id: 7, tab_id: 7, tab_name: "ttr", exited: false, is_plugin: false }]), stderr: "" }; return { code: 0, stdout: "", stderr: "" }; });
+  } finally { if (previous.session === undefined) delete process.env.ZELLIJ_SESSION_NAME; else process.env.ZELLIJ_SESSION_NAME = previous.session; if (previous.pane === undefined) delete process.env.ZELLIJ_PANE_ID; else process.env.ZELLIJ_PANE_ID = previous.pane; }
+  const command = calls.find(args => args.includes("new-pane")); assert.deepEqual(command.slice(0, 10), ["action", "new-pane", "--tab-id", "7", "--cwd", "/repo/payments", "--name", "ttr: Jamie", "--stacked", "--no-focus"]); assert.match(command.join(" "), /TTR_MANAGER_BOOTSTRAP=.*payments.*billing/); assert.ok(command.includes("--name") && command.includes("Jamie"));
+});
+
+test("despawn unregisters a Manager before closing its pane", async () => {
+  const { despawnTtrManager } = await loadModule(); const calls = [], steps = [], previous = { session: process.env.ZELLIJ_SESSION_NAME, pane: process.env.ZELLIJ_PANE_ID }; process.env.ZELLIJ_SESSION_NAME = "workspace"; process.env.ZELLIJ_PANE_ID = "1"; let listed = 0;
+  try { await despawnTtrManager({}, { cwd: "/repo", ui: { notify() {} } }, "manager", async () => { steps.push("unregistered"); }, async () => [{ id: "manager", name: "Manager", path: "/sessions/manager.jsonl" }], async args => { calls.push(args); if (args.includes("list-panes")) return { code: 0, stdout: JSON.stringify(listed++ ? [] : [{ id: 7, tab_id: 4, tab_name: "ttr", pane_command: "pi --session /sessions/manager.jsonl", exited: false, is_plugin: false }]), stderr: "" }; if (args.includes("close-pane")) steps.push("closed"); return { code: 0, stdout: "", stderr: "" }; }); } finally { if (previous.session === undefined) delete process.env.ZELLIJ_SESSION_NAME; else process.env.ZELLIJ_SESSION_NAME = previous.session; if (previous.pane === undefined) delete process.env.ZELLIJ_PANE_ID; else process.env.ZELLIJ_PANE_ID = previous.pane; }
+  assert.deepEqual(steps, ["unregistered", "closed"]); assert.ok(calls.some(args => args.includes("close-tab-by-id") && args.includes("4")));
+});
+
+test("spawn bootstrap registers the child session once", async () => {
+  const previous = process.env.TTR_MANAGER_BOOTSTRAP; process.env.TTR_MANAGER_BOOTSTRAP = JSON.stringify({ domains: ["payments", "billing"] });
+  try { const extension = await loadExtension(); const { api, events, context, notifications } = setup("child", "Jamie"); extension(api); await events.get("session_start")({}, context); assert.match(notifications.at(-1), /TTR Manager registered: payments, billing/); } finally { if (previous === undefined) delete process.env.TTR_MANAGER_BOOTSTRAP; else process.env.TTR_MANAGER_BOOTSTRAP = previous; }
 });
 
 test("restore fails clearly when a registered session cannot be verified active", async () => {

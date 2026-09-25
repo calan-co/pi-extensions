@@ -26,7 +26,8 @@ Make `/ttr restore` reconcile a surviving `ttr` Zellij tab with the active regis
 - [ ] Keep verified active `pi --session` panes, replace exited matching panes when safe, and create panes for missing sessions.
 - [ ] Verify every active registered TTR session has a live matching Pi pane after restoration.
 - [ ] Report incomplete recovery clearly without mutating TTR state.
-- [ ] Add regression coverage for rebooted tabs, exited panes, missing panes, and failed verification.
+- [ ] Spawn a named Manager pane in the active `ttr` tab and bootstrap its canonical domain plus aliases without replacement authority.
+- [ ] Add regression coverage for rebooted tabs, exited panes, missing panes, failed verification, and Manager bootstrap conflicts.
 
 ## Deliverables
 
@@ -39,4 +40,5 @@ Make `/ttr restore` reconcile a surviving `ttr` Zellij tab with the active regis
 - [ ] An exited pane with an unambiguous matching working directory is resumed or safely replaced with its registered Pi session.
 - [ ] Missing registered sessions receive stacked replacement panes.
 - [ ] Restore reports failure when any registered session cannot be verified active.
-- [ ] TTR state and authorization behavior remain unchanged.
+- [ ] A spawned Manager receives the requested Pi session name and registers its canonical domain plus aliases only when no active conflict exists.
+- [ ] TTR state and authorization behavior remain unchanged except for the new Manager's normal registration.

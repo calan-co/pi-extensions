@@ -38,6 +38,8 @@ Do not edit `state.json` directly. TTR has no external transport: requester-mess
 /ttr list [--active] --select  # select a registered persisted Pi session, then resume it here
 /ttr list --admin
 /ttr restore [zellij-session]  # reopen active registered Manager sessions in this or a named active Zellij session
+/ttr spawn <name> <domain> [aliases…] [--zellij-session=name]
+/ttr despawn <domain> [--zellij-session=name]
 /ttr ui                         # inspect a defect or transfer coordinator as admin
 /ttr unregister [domain] [--all]
 /ttr unregister <session-id> --admin
@@ -45,6 +47,8 @@ Do not edit `state.json` directly. TTR has no external transport: requester-mess
 ```
 
 `/ttr restore` is read-only with respect to TTR state. It requires persisted Pi sessions and either a live Zellij parent or a named active Zellij session. In an existing `ttr` tab it keeps verified live `pi --session` panes, replaces an unambiguous exited pane with the matching session, creates stacked panes for missing sessions, then fails clearly unless every active registered Manager session is verified live.
+
+`/ttr spawn` starts a named Pi session in the `ttr` tab. Its one-shot bootstrap registers the first supplied domain as canonical and the remainder as aliases; it refuses existing active registrations. `/ttr despawn` requires the caller's existing Manager/admin authority, unregisters every alias for the selected Manager, closes its active Pi pane, and closes `ttr` only when no terminal panes remain.
 
 ## Tool flow
 
