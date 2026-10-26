@@ -1,0 +1,29 @@
+name: Organization CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  hygiene:
+    uses: calan-co/cicd-shared-pipeline/.github/workflows/reusable-repository-hygiene.yml@v1
+  node:
+    uses: calan-co/cicd-shared-pipeline/.github/workflows/reusable-node-ci.yml@v1
+    with:
+      node-version: "24"
+      package-manager: pnpm
+      pnpm-version: "10"
+      cache-dependency-path: pnpm-lock.yaml
+      working-directory: .
+      install-command: pnpm install --frozen-lockfile
+      enable-lint: true
+      enable-typecheck: false
+      enable-tests: true
+      enable-build: false
+      lint-command: pnpm run check
+      test-command: pnpm test
