@@ -22,6 +22,7 @@
     "@bufbuild/cel": "^0.6.0",
     "@bufbuild/protobuf": "^2.13.0",
     "@earendil-works/pi-ai": "0.80.5",
+    "@earendil-works/pi-durable": "1.4.0",
     "@earendil-works/pi-tui": "^0.80.3",
     "@sinclair/typebox": "^0.34.49",
     "@sting8k/pi-vcc": "^0.4.0",
