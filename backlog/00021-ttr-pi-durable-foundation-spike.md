@@ -6,7 +6,7 @@ type: work-item
 subtype: feature
 lifecycle: active
 status: ready
-status_reason: Approved first stage of the Pi Durable migration; scope is limited to a reversible, no-live-routing foundation spike.
+status_reason: auto
 priority: critical
 estimated: 5
 tags:
