@@ -9,9 +9,6 @@ status: ready
 status_reason: Approved first stage of the Pi Durable migration; scope is limited to a reversible, no-live-routing foundation spike.
 priority: critical
 estimated: 5
-links:
-  depends_on:
-    - '[[00020-ttr-pi-durable-service-migration]]'
 tags:
   - ttr
   - pi-durable
