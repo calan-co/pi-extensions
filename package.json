@@ -21,9 +21,6 @@
     "@ai-hero/sandcastle": "^0.12.0",
     "@bufbuild/cel": "^0.6.0",
     "@bufbuild/protobuf": "^2.13.0",
-    "@earendil-works/pi-ai": "0.80.5",
-    "@earendil-works/pi-tui": "^0.80.3",
-    "@sinclair/typebox": "^0.34.49",
     "@sting8k/pi-vcc": "^0.4.0",
     "zod": "^4.4.3"
   },
@@ -31,6 +28,11 @@
     "@types/node": "^26.1.2",
     "tsx": "^4.23.0",
     "typescript": "^7.0.2"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-tui": "*",
+    "@sinclair/typebox": "*"
   },
   "keywords": [
     "pi-package"
