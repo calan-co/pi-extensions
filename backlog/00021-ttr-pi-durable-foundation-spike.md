@@ -5,8 +5,8 @@ summary: Prove a SQLite-backed Pi Durable TTR service foundation without enablin
 type: work-item
 subtype: feature
 lifecycle: active
-status: running
-status_reason: implementation
+status: paused
+status_reason: blocked
 priority: critical
 estimated: 5
 tags:
