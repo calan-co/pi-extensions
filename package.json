@@ -21,6 +21,8 @@
     "@ai-hero/sandcastle": "^0.12.0",
     "@bufbuild/cel": "^0.6.0",
     "@bufbuild/protobuf": "^2.13.0",
+    "@earendil-works/chord": "1.4.0",
+    "@earendil-works/pi-durable": "1.4.0",
     "@sting8k/pi-vcc": "^0.4.0",
     "zod": "^4.4.3"
   },

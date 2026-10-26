@@ -10,6 +10,7 @@
     "types": ["node"]
   },
   "include": [
+    "durable-ttr/**/*.ts",
     "extensions/**/*.ts"
   ]
 }
