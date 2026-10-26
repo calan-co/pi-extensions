@@ -13,3 +13,4 @@ __pycache__/
 .doc-vader/
 *.log
 .pi-subagents/
+.a5c/
