@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -55,15 +55,15 @@ test("list selection resumes a selected registered Pi session", async () => {
   assert.equal(context.path, "/sessions/manager.jsonl");
 });
 
-test("restore opens registered persisted sessions in a stacked ttr Zellij tab", async () => {
+test("restore opens registered persisted sessions from a layout when no ttr tab exists", async () => {
   const { restoreTtrSessions } = await loadModule(); const calls = [], notifications = [], previous = { session: process.env.ZELLIJ_SESSION_NAME, pane: process.env.ZELLIJ_PANE_ID }; process.env.ZELLIJ_SESSION_NAME = "workspace"; process.env.ZELLIJ_PANE_ID = "1";
-  const restored = [{ id: 1, tab_id: 7, tab_name: "ttr", pane_command: "pi --session /sessions/payments.jsonl", exited: false, is_plugin: false }, { id: 2, tab_id: 7, tab_name: "ttr", pane_command: "pi --session /sessions/risk.jsonl", exited: false, is_plugin: false }];
   try {
-    await restoreTtrSessions({}, { cwd: "/fallback", ui: { notify(message) { notifications.push(message); } } }, [{ domain: "payments", aliases: [], sessionId: "payments", active: true }, { domain: "risk", aliases: [], sessionId: "risk", active: true }], async () => [{ id: "payments", name: "Payments", path: "/sessions/payments.jsonl", cwd: "/repo/payments" }, { id: "risk", name: "Risk", path: "/sessions/risk.jsonl", cwd: "/repo/risk" }], async args => { calls.push(args); if (args.includes("new-tab")) return { code: 0, stdout: "7\n", stderr: "" }; if (args.includes("list-panes")) return { code: 0, stdout: JSON.stringify(restored), stderr: "" }; return { code: 0, stdout: "", stderr: "" }; });
+    await restoreTtrSessions({}, { cwd: "/fallback", ui: { notify(message) { notifications.push(message); } } }, [{ domain: "payments", aliases: [], sessionId: "payments", active: true }, { domain: "risk", aliases: [], sessionId: "risk", active: true }], async () => [{ id: "payments", name: "Payments", path: "/sessions/payments.jsonl", cwd: "/repo/payments" }, { id: "risk", name: "Risk", path: "/sessions/risk.jsonl", cwd: "/repo/risk" }], async args => { calls.push(args); return { code: 0, stdout: "", stderr: "" }; });
   } finally { if (previous.session === undefined) delete process.env.ZELLIJ_SESSION_NAME; else process.env.ZELLIJ_SESSION_NAME = previous.session; if (previous.pane === undefined) delete process.env.ZELLIJ_PANE_ID; else process.env.ZELLIJ_PANE_ID = previous.pane; }
   assert.deepEqual(calls[0], ["action", "query-tab-names"]);
-  assert.deepEqual(calls[1], ["action", "new-tab", "--name", "ttr", "--cwd", "/repo/payments", "--", "pi", "--session", "/sessions/payments.jsonl"]);
-  assert.deepEqual(calls[2], ["action", "new-pane", "--tab-id", "7", "--cwd", "/repo/risk", "--name", "ttr: Risk", "--stacked", "--no-focus", "--", "pi", "--session", "/sessions/risk.jsonl"]);
+  assert.equal(calls[1][0], "--layout");
+  const layout = await readFile(calls[1][1], "utf8");
+  assert.match(layout, /tab name="ttr"/); assert.match(layout, /args "--session" "\/sessions\/payments\.jsonl"/); assert.match(layout, /args "--session" "\/sessions\/risk\.jsonl"/);
   assert.match(notifications.at(-1), /Restored 2 TTR sessions/);
 });
 
@@ -74,8 +74,24 @@ test("restore replaces exited TTR panes and adds missing registered sessions aft
     await restoreTtrSessions({}, { cwd: "/fallback", ui: { notify(message) { notifications.push(message); } } }, [{ domain: "payments", aliases: [], sessionId: "payments", active: true }, { domain: "risk", aliases: [], sessionId: "risk", active: true }], async () => sessions, async args => { calls.push(args); if (args.includes("query-tab-names")) return { code: 0, stdout: "ttr\n", stderr: "" }; if (args.includes("list-panes")) return { code: 0, stdout: JSON.stringify(paneLists++ ? restored : initial), stderr: "" }; return { code: 0, stdout: "", stderr: "" }; });
   } finally { if (previous.session === undefined) delete process.env.ZELLIJ_SESSION_NAME; else process.env.ZELLIJ_SESSION_NAME = previous.session; if (previous.pane === undefined) delete process.env.ZELLIJ_PANE_ID; else process.env.ZELLIJ_PANE_ID = previous.pane; }
   assert.ok(calls.some(args => args.includes("--in-place") && args.includes("3") && args.includes("/sessions/payments.jsonl")));
-  assert.ok(calls.some(args => args.includes("--tab-id") && args.includes("7") && args.includes("/sessions/risk.jsonl")));
-  assert.match(notifications.at(-1), /Restored 2 TTR sessions/);
+  assert.ok(calls.some(args => args[0] === "--layout"));
+  assert.match(notifications.at(-1), /ttr-restore tab for 1 missing TTR sessions/);
+});
+
+test("restore focuses an existing ttr tab before reading panes", async () => {
+  const { restoreTtrSessions } = await loadModule(); const calls = [], previous = { session: process.env.ZELLIJ_SESSION_NAME, pane: process.env.ZELLIJ_PANE_ID }; process.env.ZELLIJ_SESSION_NAME = "workspace"; process.env.ZELLIJ_PANE_ID = "1"; let focused = false;
+  try {
+    await restoreTtrSessions({}, { cwd: "/fallback", ui: { notify() {} } }, [{ domain: "payments", aliases: [], sessionId: "payments", active: true }], async () => [{ id: "payments", name: "Payments", path: "/sessions/payments.jsonl", cwd: "/repo/payments" }], async args => { calls.push(args); if (args.includes("query-tab-names")) return { code: 0, stdout: "main\nttr\n", stderr: "" }; if (args.includes("go-to-tab-name")) { focused = true; return { code: 0, stdout: "", stderr: "" }; } if (args.includes("list-panes")) return { code: 0, stdout: JSON.stringify(focused ? [{ id: 1, tab_id: 7, tab_name: "ttr", pane_command: "pi --session /sessions/payments.jsonl", exited: false, is_plugin: false }] : []), stderr: "" }; return { code: 0, stdout: "", stderr: "" }; });
+  } finally { if (previous.session === undefined) delete process.env.ZELLIJ_SESSION_NAME; else process.env.ZELLIJ_SESSION_NAME = previous.session; if (previous.pane === undefined) delete process.env.ZELLIJ_PANE_ID; else process.env.ZELLIJ_PANE_ID = previous.pane; }
+  assert.ok(calls.findIndex(args => args.includes("go-to-tab-name")) < calls.findIndex(args => args.includes("list-panes")));
+});
+
+test("restore recovers when a named ttr tab has no reported panes", async () => {
+  const { restoreTtrSessions } = await loadModule(); const calls = [], previous = { session: process.env.ZELLIJ_SESSION_NAME, pane: process.env.ZELLIJ_PANE_ID }; process.env.ZELLIJ_SESSION_NAME = "workspace"; process.env.ZELLIJ_PANE_ID = "1"; let focused = false;
+  try {
+    await restoreTtrSessions({}, { cwd: "/fallback", ui: { notify() {} } }, [{ domain: "payments", aliases: [], sessionId: "payments", active: true }], async () => [{ id: "payments", name: "Payments", path: "/sessions/payments.jsonl", cwd: "/repo/payments" }], async args => { calls.push(args); if (args.includes("query-tab-names")) return { code: 0, stdout: "ttr\n", stderr: "" }; if (args.includes("new-tab")) return { code: 0, stdout: "8\n", stderr: "" }; if (args.includes("go-to-tab-by-id")) { focused = true; return { code: 0, stdout: "", stderr: "" }; } if (args.includes("list-panes")) return { code: 0, stdout: JSON.stringify(focused ? [{ id: 1, tab_id: 8, tab_name: "ttr", pane_command: "pi --session /sessions/payments.jsonl", exited: false, is_plugin: false }] : []), stderr: "" }; return { code: 0, stdout: "", stderr: "" }; });
+  } finally { if (previous.session === undefined) delete process.env.ZELLIJ_SESSION_NAME; else process.env.ZELLIJ_SESSION_NAME = previous.session; if (previous.pane === undefined) delete process.env.ZELLIJ_PANE_ID; else process.env.ZELLIJ_PANE_ID = previous.pane; }
+  assert.ok(calls.some(args => args[0] === "--layout"));
 });
 
 test("restore targets a named active Zellij session without requiring a local Zellij parent", async () => {
@@ -85,6 +101,22 @@ test("restore targets a named active Zellij session without requiring a local Ze
   } finally { if (previous.session === undefined) delete process.env.ZELLIJ_SESSION_NAME; else process.env.ZELLIJ_SESSION_NAME = previous.session; if (previous.pane === undefined) delete process.env.ZELLIJ_PANE_ID; else process.env.ZELLIJ_PANE_ID = previous.pane; }
   assert.deepEqual(calls[0], ["list-sessions", "--short"]);
   assert.deepEqual(calls[1], ["--session", "rebooted", "action", "query-tab-names"]);
+});
+
+test("restore creates a missing named Zellij session from a layout", async () => {
+  const { restoreTtrSessions } = await loadModule(); const calls = [], previous = { session: process.env.ZELLIJ_SESSION_NAME, pane: process.env.ZELLIJ_PANE_ID }; delete process.env.ZELLIJ_SESSION_NAME; delete process.env.ZELLIJ_PANE_ID;
+  try {
+    await restoreTtrSessions({}, { cwd: "/fallback", ui: { notify() {} } }, [{ domain: "payments", aliases: [], sessionId: "payments", active: true }], async () => [{ id: "payments", name: "Payments", path: "/sessions/payments.jsonl", cwd: "/repo/payments" }], async args => { calls.push(args); if (args[0] === "list-sessions") return { code: 0, stdout: "workspace\n", stderr: "" }; return { code: 0, stdout: "", stderr: "" }; }, "ttr");
+  } finally { if (previous.session === undefined) delete process.env.ZELLIJ_SESSION_NAME; else process.env.ZELLIJ_SESSION_NAME = previous.session; if (previous.pane === undefined) delete process.env.ZELLIJ_PANE_ID; else process.env.ZELLIJ_PANE_ID = previous.pane; }
+  assert.equal(calls[1][0], "attach");
+  assert.deepEqual(calls[1].slice(0, 5), ["attach", "--create-background", "ttr", "options", "--default-layout"]);
+});
+
+test("restore verification checks terminal_command when pane_command is only the executable", async () => {
+  const { restoreTtrSessions } = await loadModule(); const previous = { session: process.env.ZELLIJ_SESSION_NAME, pane: process.env.ZELLIJ_PANE_ID }; process.env.ZELLIJ_SESSION_NAME = "workspace"; process.env.ZELLIJ_PANE_ID = "1";
+  try {
+    await restoreTtrSessions({}, { cwd: "/fallback", ui: { notify() {} } }, [{ domain: "payments", aliases: [], sessionId: "payments", active: true }], async () => [{ id: "payments", name: "Payments", path: "/sessions/payments.jsonl", cwd: "/repo/payments" }], async args => { if (args.includes("query-tab-names")) return { code: 0, stdout: "ttr\n", stderr: "" }; if (args.includes("list-panes")) return { code: 0, stdout: JSON.stringify([{ id: 1, tab_id: 7, tab_name: "ttr", pane_command: "pi", terminal_command: "pi --session /sessions/payments.jsonl", exited: false, is_plugin: false }]), stderr: "" }; return { code: 0, stdout: "", stderr: "" }; });
+  } finally { if (previous.session === undefined) delete process.env.ZELLIJ_SESSION_NAME; else process.env.ZELLIJ_SESSION_NAME = previous.session; if (previous.pane === undefined) delete process.env.ZELLIJ_PANE_ID; else process.env.ZELLIJ_PANE_ID = previous.pane; }
 });
 
 test("spawn opens a named Manager Pi pane with one-shot registration domains", async () => {
@@ -106,10 +138,10 @@ test("spawn bootstrap registers the child session once", async () => {
   try { const extension = await loadExtension(); const { api, events, context, notifications } = setup("child", "Jamie"); extension(api); await events.get("session_start")({}, context); assert.match(notifications.at(-1), /TTR Manager registered: payments, billing/); } finally { if (previous === undefined) delete process.env.TTR_MANAGER_BOOTSTRAP; else process.env.TTR_MANAGER_BOOTSTRAP = previous; }
 });
 
-test("restore fails clearly when a registered session cannot be verified active", async () => {
+test("restore fails clearly when Zellij refuses an exited pane replacement", async () => {
   const { restoreTtrSessions } = await loadModule(); const previous = { session: process.env.ZELLIJ_SESSION_NAME, pane: process.env.ZELLIJ_PANE_ID }; process.env.ZELLIJ_SESSION_NAME = "workspace"; process.env.ZELLIJ_PANE_ID = "1";
   try {
-    await assert.rejects(() => restoreTtrSessions({}, { cwd: "/fallback", ui: { notify() {} } }, [{ domain: "payments", aliases: [], sessionId: "payments", active: true }], async () => [{ id: "payments", name: "Payments", path: "/sessions/payments.jsonl", cwd: "/repo/payments" }], async args => { if (args.includes("query-tab-names")) return { code: 0, stdout: "ttr\n", stderr: "" }; if (args.includes("list-panes")) return { code: 0, stdout: JSON.stringify([{ id: 7, tab_id: 7, tab_name: "ttr", pane_cwd: "/other", exited: false, is_plugin: false }]), stderr: "" }; return { code: 0, stdout: "", stderr: "" }; }), /TTR restore incomplete; active Pi panes missing for: Payments/);
+    await assert.rejects(() => restoreTtrSessions({}, { cwd: "/fallback", ui: { notify() {} } }, [{ domain: "payments", aliases: [], sessionId: "payments", active: true }], async () => [{ id: "payments", name: "Payments", path: "/sessions/payments.jsonl", cwd: "/repo/payments" }], async args => { if (args.includes("query-tab-names")) return { code: 0, stdout: "ttr\n", stderr: "" }; if (args.includes("list-panes")) return { code: 0, stdout: JSON.stringify([{ id: 7, tab_id: 7, tab_name: "ttr", pane_cwd: "/repo/payments", exited: true, is_plugin: false }]), stderr: "" }; if (args.includes("new-pane")) return { code: 1, stdout: "", stderr: "no pane" }; return { code: 0, stdout: "", stderr: "" }; }), /zellij new-pane --in-place failed: no pane/);
   } finally { if (previous.session === undefined) delete process.env.ZELLIJ_SESSION_NAME; else process.env.ZELLIJ_SESSION_NAME = previous.session; if (previous.pane === undefined) delete process.env.ZELLIJ_PANE_ID; else process.env.ZELLIJ_PANE_ID = previous.pane; }
 });
 
