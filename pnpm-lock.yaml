@@ -216,6 +216,9 @@ importers:
       '@bufbuild/protobuf':
         specifier: ^2.13.0
         version: 2.13.0
+      '@earendil-works/chord':
+        specifier: 1.4.0
+        version: 1.4.0
       '@earendil-works/pi-ai':
         specifier: 0.80.5
         version: 0.80.5(ws@8.21.0)(zod@4.4.3)

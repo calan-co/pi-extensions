@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { access, constants, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -25,6 +25,13 @@ async function databasePath() {
   return join(await mkdtemp(join(tmpdir(), "durable-ttr-")), "foundation.sqlite");
 }
 
+test("read-only inspection does not initialize a missing foundation database", async () => {
+  const database = await databasePath();
+
+  await assert.rejects(() => inspectCanonicalState(database), /does not exist/i);
+  await assert.rejects(() => access(database, constants.F_OK), { code: "ENOENT" });
+});
+
 test("core document API imports a canonical snapshot once and exposes its immutable receipt", async () => {
   const database = await databasePath();
 
@@ -47,21 +54,29 @@ test("core document API imports a canonical snapshot once and exposes its immuta
 test("service boundary resumes only a replay-safe maintenance task after reopen", async () => {
   const database = await databasePath();
   await importCanonicalSnapshot(database, snapshot);
-  const service = await openTtrFoundation(database, { runSafeTask: async () => { throw new Error("simulated crash"); } });
+  const started = Promise.withResolvers();
+  const service = await openTtrFoundation(database, {
+    runSafeTask: async (_task, signal) => {
+      started.resolve();
+      await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }));
+    },
+  });
   const before = await service.status();
 
   await assert.rejects(() => service.intake({}), /not available/i);
   await assert.rejects(() => service.route({}), /not available/i);
   await assert.rejects(() => service.externalEffect({}), /not available/i);
   await assert.rejects(() => service.runTask({ replay: "unsafe" }), /replay-safe/i);
-  await assert.rejects(() => service.runTask({ replay: "safe", id: "rebuild-status" }), /simulated crash/);
+  const pending = service.runTask({ replay: "safe", id: "rebuild-status" });
+  await started.promise;
   await service.close();
+  await pending.catch(() => {});
 
-  const resumed = [];
-  const reopened = await openTtrFoundation(database, { runSafeTask: async task => resumed.push(task.id) });
+  const resumed = Promise.withResolvers();
+  const reopened = await openTtrFoundation(database, { runSafeTask: async task => resumed.resolve(task.id) });
+  assert.equal(await resumed.promise, "rebuild-status");
   const after = await reopened.status();
   await reopened.close();
 
   assert.deepEqual(after, before);
-  assert.deepEqual(resumed, ["rebuild-status"]);
 });

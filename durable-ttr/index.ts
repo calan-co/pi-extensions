@@ -1,5 +1,9 @@
+import { access, constants } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { Harness, createRegistry, defineDoc, defineExtension, defineTask } from "@earendil-works/pi-durable";
+import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import type { HarnessOptions } from "@earendil-works/pi-durable";
 
 export type DomainDocument = { id: string; managerSessionId: string };
 export type WorkItemDocument = { domain: string; id: string; path: string; status: string; lifecycleStates: string[] };
@@ -17,28 +21,25 @@ export type AuditReceiptDocument = { sourceHash: string; sourceVersion: number; 
 export type ImportResult = { imported: boolean; receipt: AuditReceiptDocument };
 export type CanonicalState = { domains: DomainDocument[]; defects: DefectDocument[]; audit: AuditReceiptDocument[] };
 
-type Database = Awaited<ReturnType<typeof openNodeSqliteDatabase>>;
-type Executor = { exec(sql: string): Promise<void>; run(sql: string, ...params: (string | number | null)[]): Promise<void>; get<T extends object>(sql: string, ...params: (string | number | null)[]): Promise<T | undefined>; all<T extends object>(sql: string, ...params: (string | number | null)[]): Promise<T[]> };
 type Task = { id: "rebuild-status"; replay: "safe" };
-type StoredTask = { id: string };
+type ImportDocument = { hashes: string[] };
+type MetadataDocument = { records: { sourceHash: string; source: CanonicalSnapshot["source"] }[] };
 
-const schema = `
-  CREATE TABLE IF NOT EXISTS ttr_document (
-    kind TEXT NOT NULL,
-    id TEXT NOT NULL,
-    body TEXT NOT NULL,
-    PRIMARY KEY (kind, id)
-  );
-  CREATE TABLE IF NOT EXISTS ttr_import (
-    source_hash TEXT PRIMARY KEY,
-    receipt TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS ttr_maintenance_task (
-    id TEXT PRIMARY KEY,
-    replay TEXT NOT NULL CHECK (replay = 'safe'),
-    status TEXT NOT NULL CHECK (status IN ('pending', 'completed'))
-  );
-`;
+const DomainRegistry = defineDoc<{ domains: DomainDocument[] }>({
+  kind: "ttr.domain-registry", version: 1, scope: "session", initial: () => ({ domains: [] }), checkpointWhen: () => true,
+});
+const DefectRecords = defineDoc<{ defects: DefectDocument[] }>({
+  kind: "ttr.defect-records", version: 1, scope: "session", initial: () => ({ defects: [] }), checkpointWhen: () => true,
+});
+const ImportReceipts = defineDoc<{ receipts: AuditReceiptDocument[] }>({
+  kind: "ttr.import-receipts", version: 1, scope: "session", initial: () => ({ receipts: [] }), checkpointWhen: () => true,
+});
+const ImportMetadata = defineDoc<MetadataDocument>({
+  kind: "ttr.migration-metadata", version: 1, scope: "session", initial: () => ({ records: [] }), checkpointWhen: () => true,
+});
+const ImportedSources = defineDoc<ImportDocument>({
+  kind: "ttr.imported-sources", version: 1, scope: "session", initial: () => ({ hashes: [] }), checkpointWhen: () => true,
+});
 
 const canonicalJson = (value: unknown): string => {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
@@ -46,8 +47,24 @@ const canonicalJson = (value: unknown): string => {
   return JSON.stringify(value);
 };
 const sourceHash = (snapshot: CanonicalSnapshot) => createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
-const parse = <T>(value: string): T => JSON.parse(value) as T;
 const unsupported = (): never => { throw new Error("Live intake, routing, and external effects are not available in the durable TTR foundation"); };
+// ponytail: no model may run until a later routing stage supplies one.
+const noModels = {
+  getProviders: () => [], getProvider: () => undefined, getModels: () => [], getModel: () => undefined,
+  getModelsOfType: () => [], getModelOfType: () => undefined, getAllModels: () => [],
+  refresh: async () => ({ aborted: false, errors: new Map() }), checkAuth: async () => undefined,
+  getAvailable: async () => [], getAvailableOfType: async () => [], getAllAvailable: async () => [], getAuth: async () => undefined,
+  login: async () => { throw new Error("Model execution is unavailable in the durable TTR foundation"); },
+  logout: async () => {}, stream: () => { throw new Error("Model execution is unavailable in the durable TTR foundation"); },
+  complete: async () => { throw new Error("Model execution is unavailable in the durable TTR foundation"); },
+  streamSimple: () => { throw new Error("Model execution is unavailable in the durable TTR foundation"); },
+  completeSimple: async () => { throw new Error("Model execution is unavailable in the durable TTR foundation"); },
+  streamDeferred: () => { throw new Error("Model execution is unavailable in the durable TTR foundation"); },
+  fetchDeferred: async () => { throw new Error("Model execution is unavailable in the durable TTR foundation"); },
+  cancelDeferred: async () => { throw new Error("Model execution is unavailable in the durable TTR foundation"); },
+  generateImages: async () => { throw new Error("Model execution is unavailable in the durable TTR foundation"); },
+  classify: async () => { throw new Error("Model execution is unavailable in the durable TTR foundation"); },
+} as HarnessOptions["models"];
 
 function requireRecord(value: unknown, label: string): asserts value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError(`${label} must be an object`);
@@ -81,82 +98,98 @@ function validateSnapshot(snapshot: unknown): asserts snapshot is CanonicalSnaps
   unique(snapshot.defects.map(defect => defect.id), "defect");
 }
 
-async function open(databasePath: string, initialize: boolean): Promise<Database> {
-  const database = await openNodeSqliteDatabase(databasePath);
-  if (initialize) await database.exec(schema);
-  return database;
+export type FoundationOptions = { runSafeTask?: (task: Task, signal: AbortSignal) => Promise<void> | void };
+export type FoundationStatus = CanonicalState;
+
+function maintenanceTask(run: NonNullable<FoundationOptions["runSafeTask"]>) {
+  return defineTask<undefined, { phase: "run" }, null>({
+    name: "ttr.rebuild-status", version: 1, initial: () => ({ phase: "run" }),
+    phases: {
+      run: async (_task, runtime, context) => {
+        await run({ id: "rebuild-status", replay: "safe" }, runtime.signal);
+        await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), context);
+      },
+    },
+    abort: async (_task, runtime, context) => {
+      await runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context);
+    },
+  });
+}
+
+async function openFoundation(databasePath: string, options: FoundationOptions = {}) {
+  const registry = createRegistry();
+  const task = maintenanceTask(options.runSafeTask ?? (() => {}));
+  registry.install(defineExtension({ name: "ttr-foundation", tasks: [task] }));
+  return { harness: await Harness.open(await openNodeSqliteStorage(databasePath), { models: noModels, registry }, BACKGROUND_CONTEXT), task };
+}
+
+async function state(harness: Awaited<ReturnType<typeof Harness.open>>): Promise<CanonicalState> {
+  const [domains, defects, audit] = await Promise.all([
+    harness.snapshot(DomainRegistry, BACKGROUND_CONTEXT),
+    harness.snapshot(DefectRecords, BACKGROUND_CONTEXT),
+    harness.snapshot(ImportReceipts, BACKGROUND_CONTEXT),
+  ]);
+  return structuredClone({ domains: domains?.domains ?? [], defects: defects?.defects ?? [], audit: audit?.receipts ?? [] });
 }
 
 export async function importCanonicalSnapshot(databasePath: string, snapshot: CanonicalSnapshot): Promise<ImportResult> {
   validateSnapshot(snapshot);
   const hash = sourceHash(snapshot);
-  const database = await open(databasePath, true);
+  const { harness } = await openFoundation(databasePath);
   try {
-    return await database.transaction(async transaction => {
-      const existing = await transaction.get<{ receipt: string }>("SELECT receipt FROM ttr_import WHERE source_hash = ?", hash);
-      if (existing) return { imported: false, receipt: parse<AuditReceiptDocument>(existing.receipt) };
-      const receipt: AuditReceiptDocument = { sourceHash: hash, sourceVersion: snapshot.source.version, importedAt: new Date().toISOString() };
-      await transaction.run("INSERT INTO ttr_import (source_hash, receipt) VALUES (?, ?)", hash, JSON.stringify(receipt));
-      await transaction.run("INSERT INTO ttr_document (kind, id, body) VALUES (?, ?, ?)", "migration-metadata", hash, JSON.stringify(snapshot.source));
-      await transaction.run("INSERT INTO ttr_document (kind, id, body) VALUES (?, ?, ?)", "audit-receipt", hash, JSON.stringify(receipt));
-      for (const domain of snapshot.domains) await transaction.run("INSERT INTO ttr_document (kind, id, body) VALUES (?, ?, ?)", "domain", domain.id, JSON.stringify(domain));
-      for (const defect of snapshot.defects) {
-        await transaction.run("INSERT INTO ttr_document (kind, id, body) VALUES (?, ?, ?)", "defect", defect.id, JSON.stringify(defect));
-        for (const item of defect.workItems) await transaction.run("INSERT INTO ttr_document (kind, id, body) VALUES (?, ?, ?)", "work-item", `${defect.id}:${item.domain}`, JSON.stringify(item));
-        for (const [index, evidence] of defect.evidence.entries()) await transaction.run("INSERT INTO ttr_document (kind, id, body) VALUES (?, ?, ?)", "evidence", `${defect.id}:${index}`, JSON.stringify(evidence));
+    return await harness.commit(async tx => {
+      const imported = await tx.doc(ImportedSources);
+      const receipts = await tx.doc(ImportReceipts);
+      if (imported.hashes.includes(hash)) {
+        const receipt = receipts.receipts.find(item => item.sourceHash === hash);
+        if (!receipt) throw new Error("Imported source is missing its audit receipt");
+        return { imported: false, receipt: { sourceHash: receipt.sourceHash, sourceVersion: receipt.sourceVersion, importedAt: receipt.importedAt } };
       }
+      if (imported.hashes.length) throw new Error("The durable TTR foundation accepts only one canonical snapshot");
+      const receipt: AuditReceiptDocument = { sourceHash: hash, sourceVersion: snapshot.source.version, importedAt: new Date().toISOString() };
+      (await tx.doc(DomainRegistry)).domains = structuredClone(snapshot.domains);
+      (await tx.doc(DefectRecords)).defects = structuredClone(snapshot.defects);
+      (await tx.doc(ImportMetadata)).records.push({ sourceHash: hash, source: structuredClone(snapshot.source) });
+      receipts.receipts.push(receipt);
+      imported.hashes.push(hash);
       return { imported: true, receipt };
-    });
+    }, BACKGROUND_CONTEXT);
   } finally {
-    await database.close();
+    await harness.close(BACKGROUND_CONTEXT);
   }
-}
-
-async function state(database: Executor): Promise<CanonicalState> {
-  const read = async <T>(kind: string) => (await database.all<{ body: string }>("SELECT body FROM ttr_document WHERE kind = ? ORDER BY id", kind)).map(row => parse<T>(row.body));
-  return { domains: await read<DomainDocument>("domain"), defects: await read<DefectDocument>("defect"), audit: await read<AuditReceiptDocument>("audit-receipt") };
 }
 
 export async function inspectCanonicalState(databasePath: string): Promise<CanonicalState> {
-  const database = await open(databasePath, false);
   try {
-    return await state(database);
+    await access(databasePath, constants.F_OK);
+  } catch {
+    throw new Error("Durable TTR foundation database does not exist");
+  }
+  const { harness } = await openFoundation(databasePath);
+  try {
+    return await state(harness);
   } finally {
-    await database.close();
+    await harness.close(BACKGROUND_CONTEXT);
   }
 }
 
-export type FoundationOptions = { runSafeTask?: (task: Task) => Promise<void> | void };
-export type FoundationStatus = CanonicalState;
-
 export async function openTtrFoundation(databasePath: string, options: FoundationOptions = {}) {
-  const database = await open(databasePath, true);
-  const run = options.runSafeTask ?? (() => {});
-  const resume = async () => {
-    const tasks = await database.all<StoredTask>("SELECT id FROM ttr_maintenance_task WHERE status = 'pending' AND replay = 'safe' ORDER BY id");
-    for (const task of tasks) {
-      if (task.id !== "rebuild-status") throw new Error(`Unsupported durable TTR maintenance task: ${task.id}`);
-      await run({ id: task.id, replay: "safe" });
-      await database.run("UPDATE ttr_maintenance_task SET status = 'completed' WHERE id = ?", task.id);
-    }
-  };
-  try {
-    await resume();
-  } catch (error) {
-    await database.close();
-    throw error;
-  }
+  const { harness, task } = await openFoundation(databasePath, options);
+  harness.resume();
   return {
-    status: () => state(database),
-    close: () => database.close(),
+    status: () => state(harness),
+    close: () => harness.close(BACKGROUND_CONTEXT),
     async intake(_input: unknown) { unsupported(); },
     async route(_input: unknown) { unsupported(); },
     async externalEffect(_input: unknown) { unsupported(); },
     async runTask(input: { id?: string; replay?: string }) {
       if (input.replay !== "safe") throw new Error("Only replay-safe maintenance tasks are available");
       if (input.id !== "rebuild-status") throw new Error("This maintenance task is not available");
-      await database.run("INSERT OR IGNORE INTO ttr_maintenance_task (id, replay, status) VALUES (?, 'safe', 'pending')", input.id);
-      await resume();
+      const root = await harness.root(BACKGROUND_CONTEXT);
+      const id = await root.commit(tx => tx.createTask(task, undefined, { ownership: { kind: "conversation" } }), BACKGROUND_CONTEXT);
+      harness.resume();
+      const settled = await harness.waitForTask(id, BACKGROUND_CONTEXT);
+      if (settled.state.outcome.status !== "completed") throw new Error(`Replay-safe maintenance task did not complete: ${settled.state.outcome.status}`);
     },
   };
 }
