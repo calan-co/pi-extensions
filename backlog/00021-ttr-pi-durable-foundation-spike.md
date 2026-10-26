@@ -10,6 +10,7 @@ status_reason: Approved first stage of the Pi Durable migration; scope is limite
 priority: critical
 estimated: 5
 tags:
+  - afk
   - ttr
   - pi-durable
   - sqlite
