@@ -14,6 +14,7 @@ commits:
 links:
   evidence:
     - '[[record-administrator-approval-receipt-for-ttr-pi-durable-foundation-direct-push-reconciliation]]'
+    - '[[record-ttr-pi-durable-foundation-validation]]'
   reference:
     - '[[record-administrator-approval-for-ttr-pi-durable-foundation-direct-push-reconciliation]]'
 tags:
@@ -36,13 +37,13 @@ Create the smallest runnable hosted-service foundation for TTR: a SQLite-backed 
 
 ## Tasks
 
-- [ ] Add the minimal Pi Durable and SQLite dependencies and a service module isolated from the existing Pi extension.
-- [ ] Define typed documents for domain registry, defect records, work-item/evidence references, migration metadata, and immutable audit entries.
-- [ ] Write the focused failing Core-document and service-boundary tests before implementation.
-- [ ] Implement an idempotent compatibility importer from a supplied TTR snapshot; persist source version/hash and audit receipt in the same commit.
-- [ ] Implement read-only status inspection and a crash/reopen test for a replay-safe task.
-- [ ] Explicitly reject live intake, routing, external effects, and non-replay-safe tasks in the foundation.
-- [ ] Run focused tests, the relevant broader suite, type checks, independent review, and record Doc-Vader evidence.
+- [x] Add the minimal Pi Durable and SQLite dependencies and a service module isolated from the existing Pi extension.
+- [x] Define typed documents for domain registry, defect records, work-item/evidence references, migration metadata, and immutable audit entries.
+- [x] Write the focused failing Core-document and service-boundary tests before implementation.
+- [x] Implement an idempotent compatibility importer from a supplied TTR snapshot; persist source version/hash and audit receipt in the same commit.
+- [x] Implement read-only status inspection and a crash/reopen test for a replay-safe task.
+- [x] Explicitly reject live intake, routing, external effects, and non-replay-safe tasks in the foundation.
+- [x] Run focused tests, the relevant broader suite, type checks, independent review, and record Doc-Vader evidence.
 
 ## Deliverables
 
@@ -53,12 +54,12 @@ Create the smallest runnable hosted-service foundation for TTR: a SQLite-backed 
 
 ## Acceptance Criteria
 
-- [ ] A process restart resumes only the declared replay-safe test task.
-- [ ] Import is idempotent and produces one immutable audit receipt per source snapshot.
-- [ ] Read-only inspection cannot mutate the SQLite store or start/resume tasks.
-- [ ] Live routing, deployment, requester messaging, tracker writes, and repository edits are unavailable from the foundation.
-- [ ] Existing TTR extension tests pass unchanged.
-- [ ] No migration touches the current TTR `state.json`.
+- [x] A process restart resumes only the declared replay-safe test task.
+- [x] Import is idempotent and produces one immutable audit receipt per source snapshot.
+- [x] Read-only inspection cannot mutate the SQLite store or start/resume tasks.
+- [x] Live routing, deployment, requester messaging, tracker writes, and repository edits are unavailable from the foundation.
+- [x] Existing TTR extension tests pass unchanged.
+- [x] No migration touches the current TTR `state.json.
 
 ## Rollback
 
