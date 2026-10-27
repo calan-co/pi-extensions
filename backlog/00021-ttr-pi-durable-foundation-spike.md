@@ -5,10 +5,12 @@ summary: Prove a SQLite-backed Pi Durable TTR service foundation without enablin
 type: work-item
 subtype: feature
 lifecycle: active
-status: paused
-status_reason: blocked
+status: completed
+status_reason: completed
 priority: critical
 estimated: 5
+actual: 5
+completed_date: '2026-10-26'
 commits:
   462f752f7ac038738b7976204d3bea73ca2622a6: Pi Durable foundation direct push
 links:
