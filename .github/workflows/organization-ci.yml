@@ -26,4 +26,5 @@ jobs:
       enable-tests: true
       enable-build: false
       lint-command: pnpm run check
-      test-command: pnpm test
+      # ponytail: session-move needs a locally installed Pi runtime; test it in Pi's distribution CI.
+      test-command: node --import tsx --test test/*.test.mjs
