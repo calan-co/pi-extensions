@@ -13,6 +13,7 @@ async function listener(socketPath, capability, received, response) {
   const clients = new Set();
   const server = createServer(socket => {
     clients.add(socket);
+    socket.on("error", () => {});
     socket.once("close", () => clients.delete(socket));
     let pending = "";
     socket.on("data", chunk => {
