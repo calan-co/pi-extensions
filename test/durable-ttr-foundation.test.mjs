@@ -41,6 +41,10 @@ test("core document API imports a canonical snapshot once and exposes its immuta
   );
   const first = await importCanonicalSnapshot(database, snapshot);
   const second = await importCanonicalSnapshot(database, snapshot);
+  await assert.rejects(
+    () => importCanonicalSnapshot(database, { ...snapshot, source: { ...snapshot.source, capturedAt: "2026-03-13T00:00:00.000Z" } }),
+    /only one canonical snapshot/i,
+  );
   const state = await inspectCanonicalState(database);
 
   assert.equal(first.imported, true);
@@ -69,6 +73,7 @@ test("service boundary resumes only a replay-safe maintenance task after reopen"
   await assert.rejects(() => service.runTask({ replay: "unsafe" }), /replay-safe/i);
   const pending = service.runTask({ replay: "safe", id: "rebuild-status" });
   await started.promise;
+  assert.deepEqual(await inspectCanonicalState(database), before);
   await service.close();
   await pending.catch(() => {});
 

@@ -55,11 +55,11 @@ Create the smallest runnable hosted-service foundation for TTR: a SQLite-backed 
 ## Acceptance Criteria
 
 - [x] A process restart resumes only the declared replay-safe test task.
-- [x] Import is idempotent and produces one immutable audit receipt per source snapshot.
+- [x] Re-importing the same canonical snapshot is idempotent; a different second snapshot is rejected without a second audit receipt.
 - [x] Read-only inspection cannot mutate the SQLite store or start/resume tasks.
 - [x] Live routing, deployment, requester messaging, tracker writes, and repository edits are unavailable from the foundation.
 - [x] Existing TTR extension tests pass unchanged.
-- [x] No migration touches the current TTR `state.json.
+- [x] No migration touches the current TTR `state.json`.
 
 ## Rollback
 

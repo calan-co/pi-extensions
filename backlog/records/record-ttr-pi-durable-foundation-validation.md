@@ -40,5 +40,5 @@ The isolated Pi Durable foundation for wi-00021 passed focused and full validati
 
 ## Notes
 
-- No live intake, routing, external effects, deployment, requester messaging, tracker write, or repository-edit API is exposed by the foundation.
+- The foundation exposes rejecting guards for live intake, routing, and external effects; all such operations are unavailable.
 - The existing TTR state.json remains untouched.
