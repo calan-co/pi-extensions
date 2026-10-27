@@ -9,7 +9,11 @@ status: paused
 status_reason: blocked
 priority: critical
 estimated: 5
+commits:
+  462f752f7ac038738b7976204d3bea73ca2622a6: Pi Durable foundation direct push
 links:
+  evidence:
+    - '[[record-administrator-approval-receipt-for-ttr-pi-durable-foundation-direct-push-reconciliation]]'
   reference:
     - '[[record-administrator-approval-for-ttr-pi-durable-foundation-direct-push-reconciliation]]'
 tags:
