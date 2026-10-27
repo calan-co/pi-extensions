@@ -48,7 +48,7 @@ Prove one dedicated `ttr-pilot` domain can make reproducible shadow-only triage 
 
 ## Acceptance Criteria
 
-- [ ] A fixture report has the same route and manifest hash across service reopen/replay.
+- [ ] A fixture report retains the same route, manifest hash, durable decision ID, and no-op outbox ID across service reopen/replay; replay leaves both record counts unchanged.
 - [ ] Reports outside the pilot repository boundary are rejected before a shadow decision is persisted.
 - [ ] Reports with stale or mismatched manifest hashes are rejected before a shadow decision is persisted.
 - [ ] Non-shadow execution modes are rejected without live routing or external effects.
