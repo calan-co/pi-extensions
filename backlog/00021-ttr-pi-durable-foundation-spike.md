@@ -9,6 +9,9 @@ status: paused
 status_reason: blocked
 priority: critical
 estimated: 5
+links:
+  reference:
+    - '[[record-administrator-approval-for-ttr-pi-durable-foundation-direct-push-reconciliation]]'
 tags:
   - afk
   - ttr
