@@ -1,0 +1,14 @@
+{
+  "$schema": "schemas/work-management/direct-push-reconciliation.schema.json",
+  "enabled": true,
+  "repository": "github.com/calan-co/pi-extensions",
+  "protected_ref": "refs/heads/main",
+  "from": ["paused"],
+  "status": "completed",
+  "reason": "completed",
+  "receipt": {
+    "subtype": "approval",
+    "outcome": "approved"
+  },
+  "changed_files": "exact"
+}
