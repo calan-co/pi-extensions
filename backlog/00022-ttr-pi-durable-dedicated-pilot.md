@@ -50,6 +50,8 @@ Prove one dedicated `ttr-pilot` domain can make reproducible shadow-only triage 
 
 - [ ] A fixture report has the same route and manifest hash across service reopen/replay.
 - [ ] Reports outside the pilot repository boundary are rejected before a shadow decision is persisted.
+- [ ] Reports with stale or mismatched manifest hashes are rejected before a shadow decision is persisted.
+- [ ] Non-shadow execution modes are rejected without live routing or external effects.
 - [ ] The outbox contains only a no-op shadow receipt and no external effect is invoked.
 - [ ] The legacy TTR `state.json` is byte-for-byte unchanged.
 - [ ] Existing foundation and extension tests pass unchanged.
