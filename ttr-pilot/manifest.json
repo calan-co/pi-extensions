@@ -1,0 +1,10 @@
+{
+  "domain": "ttr-pilot",
+  "version": 1,
+  "repositoryBoundary": "calan-co/pi-extensions",
+  "routing": [
+    { "id": "support", "sourceDomains": ["support"] },
+    { "id": "default", "sourceDomains": ["*"] }
+  ],
+  "outboxAdapter": "noop-shadow-receipt"
+}
