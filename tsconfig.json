@@ -11,6 +11,7 @@
   },
   "include": [
     "durable-ttr/**/*.ts",
+    "ttr-pilot/**/*.ts",
     "extensions/**/*.ts"
   ]
 }
