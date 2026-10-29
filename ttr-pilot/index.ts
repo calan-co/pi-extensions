@@ -110,6 +110,7 @@ export async function inspectTtrPilot(databasePath: string): Promise<PilotState>
 export async function openTtrPilot(options: { databasePath: string; manifest: PilotManifest; manifestHash: string }) {
   const currentHash = validatePilotManifest(options.manifest);
   if (options.manifestHash !== currentHash) throw new Error("manifest hash does not match manifest");
+  const manifest = structuredClone(options.manifest);
   const harness = await open(options.databasePath);
   return {
     inspect: () => state(harness),
@@ -117,8 +118,8 @@ export async function openTtrPilot(options: { databasePath: string; manifest: Pi
     async submitShadowReport(input: ShadowSubmission): Promise<ShadowDecision & { outbox: NoopOutboxReceipt }> {
       if (input.mode !== "shadow") throw new Error("only shadow mode is available");
       if (input.manifestHash !== currentHash) throw new Error("manifest hash is stale or does not match manifest");
-      if (input.manifestVersion !== options.manifest.version) throw new Error("manifest version is stale");
-      const route = selectShadowRoute(options.manifest, input.report);
+      if (input.manifestVersion !== manifest.version) throw new Error("manifest version is stale");
+      const route = selectShadowRoute(manifest, input.report);
       const decision: ShadowDecision = { id: `shadow-decision-${hash({ manifestHash: currentHash, report: input.report, routeId: route.id })}`, reportId: input.report.id, manifestHash: currentHash, routeId: route.id };
       const outbox: NoopOutboxReceipt = { id: `noop-outbox-${hash(decision)}`, decisionId: decision.id, adapter: "noop-shadow-receipt" };
       return harness.commit(async tx => {
