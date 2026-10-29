@@ -69,6 +69,20 @@ test("service persists idempotent shadow decisions and noop receipts across reop
   assert.deepEqual(await readFile(legacyStatePath), before);
 });
 
+test("service keeps its validated manifest immutable after open", async () => {
+  const { databasePath } = await paths();
+  const mutableManifest = structuredClone(manifest);
+  const manifestHash = hashPilotManifest(mutableManifest);
+  const service = await openTtrPilot({ databasePath, manifest: mutableManifest, manifestHash });
+
+  mutableManifest.repositoryBoundary = "other/repo";
+  mutableManifest.routing[0].sourceDomains = ["other"];
+
+  const decision = await service.submitShadowReport({ report, manifestHash, manifestVersion: 1, mode: "shadow" });
+  assert.equal(decision.routeId, "support");
+  await service.close();
+});
+
 test("service rejects cross-boundary, stale hashes, and non-shadow modes before persistence", async () => {
   const { databasePath } = await paths();
   const manifestHash = hashPilotManifest(manifest);
